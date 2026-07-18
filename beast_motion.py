@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import json
 import math
+import queue
 import statistics
 import struct
+import threading
+import time
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
@@ -59,6 +62,8 @@ ORIENTATION_MIN_EXCESS_AREA_DEG_S = 8.0
 PROVISIONAL_TOP_DROP_FRACTION = 0.70
 PROVISIONAL_TOP_BRAKING_SAMPLES = 3
 BENCH_SHORT_DISTANCE_MIN_M = 0.03
+RECORDING_FLUSH_INTERVAL_S = 0.2
+RECORDING_QUEUE_MAX_RECORDS = 4096
 
 
 class AdaptiveSampleClock:
@@ -1960,11 +1965,31 @@ class ReversalRepTracker:
 
 
 class SessionRecorder:
-    def __init__(self, path: Path, exercise: str = "generic") -> None:
+    _STOP = object()
+
+    def __init__(
+        self,
+        path: Path,
+        exercise: str = "generic",
+        *,
+        flush_interval_s: float = RECORDING_FLUSH_INTERVAL_S,
+    ) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
         self.file = path.open("w", encoding="utf-8")
-        self.pending_records = 0
+        self.flush_interval_s = max(0.01, float(flush_interval_s))
+        self._queue: queue.Queue[dict | object] = queue.Queue(
+            maxsize=RECORDING_QUEUE_MAX_RECORDS
+        )
+        self._worker_error: BaseException | None = None
+        self._worker_done = threading.Event()
+        self._closed = False
+        self._worker = threading.Thread(
+            target=self._writer_loop,
+            name="beast-recording-writer",
+            daemon=False,
+        )
+        self._worker.start()
         self.write(
             {
                 "type": "metadata",
@@ -1983,18 +2008,85 @@ class SessionRecorder:
         )
 
     def write(self, record: dict) -> None:
-        self.file.write(json.dumps(record, separators=(",", ":")) + "\n")
-        self.pending_records += 1
-        if self.pending_records >= 50:
-            self.file.flush()
-            self.pending_records = 0
+        if self._closed:
+            raise RuntimeError("Cannot write to a closed recording.")
+        self._raise_worker_error()
+        try:
+            self._queue.put_nowait(record)
+        except queue.Full as exc:
+            raise RuntimeError(
+                "The recording writer cannot keep up with sensor packets."
+            ) from exc
 
     def mark_tracker_reset(self, host_timestamp: float) -> None:
         self.write({"type": "tracker_reset", "host_timestamp": host_timestamp})
 
     def close(self) -> None:
-        self.file.flush()
-        self.file.close()
+        if self._closed:
+            self._raise_worker_error()
+            return
+        self._closed = True
+        if self._worker_error is None:
+            while not self._worker_done.is_set():
+                try:
+                    self._queue.put(self._STOP, timeout=0.1)
+                    break
+                except queue.Full:
+                    self._raise_worker_error()
+        self._worker.join(timeout=10.0)
+        if self._worker.is_alive():
+            raise RuntimeError("Timed out while closing the recording writer.")
+        self._raise_worker_error()
+
+    def _writer_loop(self) -> None:
+        pending = False
+        flush_deadline = 0.0
+        try:
+            while True:
+                timeout = (
+                    max(0.0, flush_deadline - time.monotonic())
+                    if pending
+                    else None
+                )
+                try:
+                    item = self._queue.get(timeout=timeout)
+                except queue.Empty:
+                    self.file.flush()
+                    pending = False
+                    continue
+
+                if item is self._STOP:
+                    if pending:
+                        self.file.flush()
+                    break
+
+                self.file.write(
+                    json.dumps(item, separators=(",", ":")) + "\n"
+                )
+                if not pending:
+                    pending = True
+                    flush_deadline = time.monotonic() + self.flush_interval_s
+                elif time.monotonic() >= flush_deadline:
+                    self.file.flush()
+                    pending = False
+        except BaseException as exc:
+            self._worker_error = exc
+        finally:
+            try:
+                self.file.flush()
+            except BaseException as exc:
+                if self._worker_error is None:
+                    self._worker_error = exc
+            self._worker_done.set()
+            try:
+                self.file.close()
+            except BaseException as exc:
+                if self._worker_error is None:
+                    self._worker_error = exc
+
+    def _raise_worker_error(self) -> None:
+        if self._worker_error is not None:
+            raise RuntimeError("The recording writer failed.") from self._worker_error
 
 
 def recording_metadata(path: Path) -> dict:

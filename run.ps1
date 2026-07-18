@@ -8,3 +8,4 @@ if (-not [System.IO.File]::Exists($python)) {
 }
 
 & $python $tracker @args
+exit $LASTEXITCODE

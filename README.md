@@ -185,8 +185,9 @@ sensor reading.
 
 The Streamlit dashboard follows the growing JSONL recording and reprocesses its
 raw `packet_hex` data with the current detector. It runs separately from the
-Bluetooth process, so drawing and browser refreshes cannot delay sensor
-notifications.
+Bluetooth process, so drawing cannot delay sensor notifications. A local
+WebSocket pushes new batches into one persistent Plotly display instead of
+periodically rebuilding the Streamlit page.
 
 Open the dashboard in one PowerShell window:
 
@@ -205,8 +206,9 @@ The dashboard automatically switches to the new recording. It updates the
 acceleration, velocity, distance, rest, adaptive orientation, and sample-rate
 graphs; shows accepted and rejected movement markers; and keeps a scrollable
 candidate table. The sidebar can pause the display, select an older recording,
-override its exercise profile, change the refresh interval, and choose how much
-recent history is visible.
+override its exercise profile, and choose how much recent history is visible.
+Normal live updates do not rerun Streamlit, so zoom and pan remain unchanged
+and the graph does not blink.
 
 To follow one specific recording instead:
 
@@ -215,8 +217,9 @@ To follow one specific recording instead:
 ```
 
 Use `--port 8502` if port 8501 is already occupied. A live recording is flushed
-to disk in small batches, so the browser will normally trail the sensor by
-about one second.
+from a background writer approximately every `200 ms`, and the browser will
+normally receive a batch within `500 ms`. The older `--refresh-ms` dashboard
+option is accepted for compatibility but ignored.
 
 For the five-repetition bench acceptance recording:
 

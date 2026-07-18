@@ -22,6 +22,14 @@ class LiveTimedEvent:
     event: MotionEvent
 
 
+@dataclass(frozen=True)
+class LiveTailDelta:
+    decoded_samples: int
+    records: tuple[dict, ...]
+    events: tuple[LiveTimedEvent, ...]
+    reset: bool = False
+
+
 class LiveRecordingTail:
     """Incrementally decode an append-only JSONL recording.
 
@@ -73,19 +81,28 @@ class LiveRecordingTail:
 
     def read_new(self) -> int:
         """Read complete new lines and return the number of decoded samples."""
+        return self.read_delta().decoded_samples
+
+    def read_delta(self) -> LiveTailDelta:
+        """Read complete new lines and return only newly decoded output."""
         try:
             file_size = self.path.stat().st_size
         except FileNotFoundError:
-            return 0
+            return LiveTailDelta(0, (), ())
+        reset = False
         if file_size < self.offset:
             self.reset()
+            reset = True
 
-        with self.path.open("rb") as recording:
-            recording.seek(self.offset)
-            new_bytes = recording.read()
-            self.offset = recording.tell()
+        try:
+            with self.path.open("rb") as recording:
+                recording.seek(self.offset)
+                new_bytes = recording.read()
+                self.offset = recording.tell()
+        except FileNotFoundError:
+            return LiveTailDelta(0, (), (), reset=reset)
         if not new_bytes:
-            return 0
+            return LiveTailDelta(0, (), (), reset=reset)
 
         combined = self.pending_bytes + new_bytes
         lines = combined.split(b"\n")
@@ -95,6 +112,8 @@ class LiveRecordingTail:
             self.pending_bytes = lines.pop()
 
         decoded_samples = 0
+        new_records: list[dict] = []
+        new_events: list[LiveTimedEvent] = []
         for raw_line in lines:
             if not raw_line.strip():
                 continue
@@ -102,12 +121,24 @@ class LiveRecordingTail:
                 record = json.loads(raw_line.decode("utf-8"))
             except (UnicodeDecodeError, json.JSONDecodeError):
                 continue
-            decoded_samples += self._process_record(record)
+            current_record, sample_events = self._process_record(record)
+            if current_record is not None:
+                decoded_samples += 1
+                new_records.append(current_record)
+            new_events.extend(sample_events)
         if decoded_samples:
             self.revision += 1
-        return decoded_samples
+        return LiveTailDelta(
+            decoded_samples,
+            tuple(new_records),
+            tuple(new_events),
+            reset=reset,
+        )
 
-    def _process_record(self, record: dict) -> int:
+    def _process_record(
+        self,
+        record: dict,
+    ) -> tuple[dict | None, tuple[LiveTimedEvent, ...]]:
         record_type = record.get("type")
         if record_type == "metadata":
             self.metadata = record
@@ -118,14 +149,14 @@ class LiveRecordingTail:
                     self.tracker = ReversalRepTracker(
                         tracker_config_for(self.exercise)
                     )
-            return 0
+            return None, ()
         if record_type == "tracker_reset":
             self.tracker = ReversalRepTracker(
                 tracker_config_for(self.exercise)
             )
-            return 0
+            return None, ()
         if record_type != "sample":
-            return 0
+            return None, ()
 
         try:
             packet = bytes.fromhex(str(record["packet_hex"]))
@@ -133,22 +164,24 @@ class LiveRecordingTail:
                 record.get("host_timestamp", record.get("timestamp", 0.0))
             )
         except (KeyError, TypeError, ValueError):
-            return 0
+            return None, ()
         sample = decode_imu_packet(packet, host_timestamp)
         if sample is None:
-            return 0
+            return None, ()
 
         sample_events, current_record = self.tracker.process(sample)
         self.records.append(current_record)
         self.sample_count += 1
+        timed_events: list[LiveTimedEvent] = []
         for event in sample_events:
             timed = LiveTimedEvent(self.tracker.sensor_time_s, event)
             self.events.append(timed)
+            timed_events.append(timed)
             if event.kind == "rep":
                 self.accepted_reps += 1
             elif event.kind == "rejected":
                 self.rejected_candidates += 1
-        return 1
+        return current_record, tuple(timed_events)
 
     def records_since(self, history_seconds: float | None) -> list[dict]:
         records = list(self.records)

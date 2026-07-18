@@ -76,6 +76,74 @@ class CliDefaultsTests(unittest.TestCase):
         self.assertEqual(arguments.port, 8502)
         self.assertEqual(arguments.refresh_ms, 500)
 
+    def test_dashboard_launcher_uses_asgi_app_and_ignores_refresh_option(self):
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "beast sensor.py",
+                "dashboard",
+                "--exercise",
+                "bench",
+                "--refresh-ms",
+                "500",
+            ],
+        ):
+            arguments = self.cli.parse_arguments()
+        with (
+            patch.object(
+                self.cli.importlib.util,
+                "find_spec",
+                return_value=object(),
+            ),
+            patch.object(
+                self.cli,
+                "dashboard_port_is_listening",
+                return_value=False,
+            ),
+            patch.object(self.cli.subprocess, "run") as run,
+            patch("builtins.print") as output,
+        ):
+            self.cli.run_dashboard(arguments)
+
+        command = run.call_args.args[0]
+        self.assertIn(str(self.cli.DASHBOARD_APP), command)
+        self.assertNotIn("--refresh-ms", command)
+        self.assertIn("--history-seconds", command)
+        self.assertTrue(
+            any(
+                "ignored" in str(call.args[0])
+                for call in output.call_args_list
+            )
+        )
+
+    def test_dashboard_launcher_rejects_an_occupied_port(self):
+        with patch.object(
+            sys,
+            "argv",
+            ["beast sensor.py", "dashboard", "--port", "8501"],
+        ):
+            arguments = self.cli.parse_arguments()
+        with (
+            patch.object(
+                self.cli.importlib.util,
+                "find_spec",
+                return_value=object(),
+            ),
+            patch.object(
+                self.cli,
+                "dashboard_port_is_listening",
+                return_value=True,
+            ),
+            patch.object(self.cli.subprocess, "run") as run,
+        ):
+            with self.assertRaisesRegex(
+                SystemExit,
+                "already in use",
+            ):
+                self.cli.run_dashboard(arguments)
+        run.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

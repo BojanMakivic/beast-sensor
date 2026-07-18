@@ -3,6 +3,11 @@ $projectRoot = [System.IO.Path]::GetDirectoryName($MyInvocation.MyCommand.Path)
 $venvPath = [System.IO.Path]::Combine($projectRoot, ".venv")
 $python = [System.IO.Path]::Combine($venvPath, "Scripts", "python.exe")
 $requirements = [System.IO.Path]::Combine($projectRoot, "requirements.txt")
+$dashboardComponent = [System.IO.Path]::Combine(
+    $projectRoot,
+    "components",
+    "beast-live-display"
+)
 $pythonVersionFile = [System.IO.Path]::Combine($projectRoot, ".python-version")
 
 if ([System.IO.File]::Exists($pythonVersionFile)) {
@@ -118,6 +123,11 @@ if ($LASTEXITCODE -ne 0) { throw "Could not upgrade pip." }
 
 & $python -m pip install -r $requirements
 if ($LASTEXITCODE -ne 0) { throw "Could not install project dependencies." }
+
+& $python -m pip install --editable $dashboardComponent
+if ($LASTEXITCODE -ne 0) {
+    throw "Could not install the Beast dashboard component."
+}
 
 [System.Console]::WriteLine("")
 [System.Console]::WriteLine("Setup complete. Start the tracker with:")

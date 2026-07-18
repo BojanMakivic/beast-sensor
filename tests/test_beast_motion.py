@@ -2,8 +2,10 @@ import json
 import math
 import struct
 import tempfile
+import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from beast_motion import (
     AdaptiveSampleClock,
@@ -784,6 +786,70 @@ class AdaptiveSampleClockTests(unittest.TestCase):
 
 
 class RecordingTests(unittest.TestCase):
+    def test_recording_writer_reports_background_failures(self):
+        class FailingFile:
+            def write(self, _text):
+                raise OSError("disk failed")
+
+            def flush(self):
+                return None
+
+            def close(self):
+                return None
+
+        with patch.object(Path, "open", return_value=FailingFile()):
+            recorder = SessionRecorder(
+                Path("failed-recording.jsonl"),
+                flush_interval_s=0.01,
+            )
+            deadline = time.monotonic() + 1.0
+            while (
+                recorder._worker_error is None
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.01)
+            with self.assertRaisesRegex(RuntimeError, "writer failed"):
+                recorder.write({"type": "test"})
+            with self.assertRaisesRegex(RuntimeError, "writer failed"):
+                recorder.close()
+
+    def test_recording_writer_flushes_in_order_and_drains_on_close(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "batched.jsonl"
+            recorder = SessionRecorder(
+                path,
+                exercise="bench",
+                flush_interval_s=0.05,
+            )
+            for index in range(12):
+                recorder.write({"type": "test", "index": index})
+
+            deadline = time.monotonic() + 1.0
+            visible_records = []
+            while time.monotonic() < deadline:
+                text = path.read_text(encoding="utf-8")
+                visible_records = [
+                    json.loads(line) for line in text.splitlines()
+                ]
+                if len(visible_records) >= 13:
+                    break
+                time.sleep(0.01)
+
+            self.assertEqual(
+                [record["index"] for record in visible_records[1:]],
+                list(range(12)),
+            )
+            recorder.write({"type": "test", "index": 12})
+            recorder.close()
+            final_records = [
+                json.loads(line)
+                for line in path.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual(
+                [record["index"] for record in final_records[1:]],
+                list(range(13)),
+            )
+
     def test_recording_replay_preserves_packets(self):
         tracker = ReversalRepTracker()
         sequence = 0

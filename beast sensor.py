@@ -3,6 +3,7 @@ import asyncio
 import importlib.util
 import json
 import queue
+import socket
 import subprocess
 import sys
 import threading
@@ -36,7 +37,24 @@ PROJECT_DIRECTORY = Path(__file__).resolve().parent
 REPETITION_DATA_FILE = PROJECT_DIRECTORY / "beast_repetitions.json"
 EXCEL_WORKBOOK = PROJECT_DIRECTORY / "outputs" / "beast_tracker" / "Beast Workout.xlsx"
 RECORDINGS_DIRECTORY = PROJECT_DIRECTORY / "outputs" / "recordings"
-DASHBOARD_SCRIPT = PROJECT_DIRECTORY / "beast_dashboard.py"
+DASHBOARD_APP = PROJECT_DIRECTORY / "beast_dashboard_app.py"
+
+
+def dashboard_port_is_listening(port: int) -> bool:
+    """Return whether a local process is already listening on the dashboard port."""
+    addresses = (
+        (socket.AF_INET, ("127.0.0.1", port)),
+        (socket.AF_INET6, ("::1", port, 0, 0)),
+    )
+    for family, address in addresses:
+        try:
+            with socket.socket(family, socket.SOCK_STREAM) as connection:
+                connection.settimeout(0.15)
+                if connection.connect_ex(address) == 0:
+                    return True
+        except OSError:
+            continue
+    return False
 
 
 def load_repetitions() -> list[dict]:
@@ -479,12 +497,19 @@ def run_dashboard(args: argparse.Namespace) -> None:
         raise SystemExit(
             "Streamlit is not installed. Run .\\setup.ps1 first."
         )
+    if dashboard_port_is_listening(args.port):
+        raise SystemExit(
+            f"Dashboard port {args.port} is already in use. Open "
+            f"http://localhost:{args.port} if the dashboard is already "
+            "running, close its old terminal before restarting, or select "
+            "another port with --port."
+        )
     command = [
         sys.executable,
         "-m",
         "streamlit",
         "run",
-        str(DASHBOARD_SCRIPT),
+        str(DASHBOARD_APP),
         "--server.address",
         "localhost",
         "--server.port",
@@ -494,8 +519,6 @@ def run_dashboard(args: argparse.Namespace) -> None:
         "--browser.gatherUsageStats",
         "false",
         "--",
-        "--refresh-ms",
-        str(args.refresh_ms),
         "--history-seconds",
         str(args.history_seconds),
     ]
@@ -512,6 +535,11 @@ def run_dashboard(args: argparse.Namespace) -> None:
         "Leave this window open. Run the sensor in a second terminal; "
         "the dashboard will follow its newest recording."
     )
+    if args.refresh_ms is not None:
+        print(
+            "--refresh-ms is ignored because dashboard updates are "
+            "pushed through WebSocket."
+        )
     try:
         subprocess.run(command, check=True)
     except subprocess.CalledProcessError as exc:
@@ -584,8 +612,10 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--refresh-ms",
         type=int,
-        default=750,
-        help="Dashboard refresh interval in milliseconds (default: 750).",
+        help=(
+            "Deprecated compatibility option. The dashboard now receives "
+            "push updates through WebSocket."
+        ),
     )
     parser.add_argument(
         "--history-seconds",
@@ -610,13 +640,13 @@ def parse_arguments() -> argparse.Namespace:
         parser.error("--open can only be used in analyze mode.")
     if args.mode != "dashboard" and args.port != 8501:
         parser.error("--port can only be used in dashboard mode.")
-    if args.mode != "dashboard" and args.refresh_ms != 750:
+    if args.mode != "dashboard" and args.refresh_ms is not None:
         parser.error("--refresh-ms can only be used in dashboard mode.")
     if args.mode != "dashboard" and args.history_seconds != 90:
         parser.error("--history-seconds can only be used in dashboard mode.")
     if not 1 <= args.port <= 65535:
         parser.error("--port must be between 1 and 65535.")
-    if args.refresh_ms < 250:
+    if args.refresh_ms is not None and args.refresh_ms < 250:
         parser.error("--refresh-ms must be at least 250.")
     if args.history_seconds < 15:
         parser.error("--history-seconds must be at least 15.")

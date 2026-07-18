@@ -20,9 +20,12 @@ class StreamlitDashboardSmokeTests(unittest.TestCase):
             "Follow newest recording",
             [toggle.label for toggle in dashboard.toggle],
         )
-        if dashboard.metric:
-            self.assertEqual(len(dashboard.get("plotly_chart")), 1)
-            self.assertEqual(len(dashboard.dataframe), 1)
+        self.assertEqual(len(dashboard.get("plotly_chart")), 0)
+        self.assertEqual(len(dashboard.get("select_slider")), 0)
+        self.assertEqual(
+            [slider.label for slider in dashboard.slider],
+            ["Visible history (seconds)"],
+        )
 
 
 if __name__ == "__main__":
