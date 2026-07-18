@@ -7,4 +7,4 @@ if (-not [System.IO.File]::Exists($python)) {
     throw "The .venv environment is missing. Run .\setup.ps1 first."
 }
 
-& $python $tracker
+& $python $tracker @args

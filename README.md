@@ -4,7 +4,10 @@
 
 # Beast Sensor Bar-Velocity Tracker
 
-A Windows command-line tracker for a Beast Bluetooth Low Energy sensor. It connects directly to the configured sensor, detects bottom-to-top repetitions, estimates ascent time, displacement, average speed, and peak speed, and writes the results to an Excel workbook.
+A Windows command-line tracker for a Beast Bluetooth Low Energy sensor. It
+counts every upward phase between the bottom and top direction reversals,
+calculates concentric time, displacement, average velocity, and peak velocity,
+and writes accepted repetitions to an Excel workbook.
 
 ## Requirements
 
@@ -38,7 +41,15 @@ required the first time dependencies are downloaded.
 .\run.ps1
 ```
 
-Keep the sensor still during the three-second calibration. Stop the tracker with `Ctrl+C`.
+No exercise profile or expected distance is required. Keep the sensor still
+until calibration reports `Ready`, then start moving. Stop the tracker with
+`Ctrl+C`.
+
+To keep a raw recording and print direction transitions:
+
+```powershell
+.\run.ps1 --record --diagnostic
+```
 
 Each completed ascent prints:
 
@@ -48,25 +59,61 @@ REP 01 | time 1.20 s | displacement 0.650 m | average speed 0.542 m/s | peak spe
 
 The generated files are stored locally:
 
-- `beast_repetitions.json` contains the source measurements.
+- `beast_repetitions.json` contains accepted repetition measurements.
 - `outputs/beast_tracker/Beast Workout.xlsx` contains the formatted Excel log.
+- `outputs/recordings/*.jsonl` contains optional raw sensor recordings.
 
 These runtime files are ignored by Git so every machine starts with a clean training log.
 
 ## How repetition detection works
 
-The sensor quaternion is used to rotate acceleration into the vertical world axis. The signal is filtered to reduce bias and drift, then integrated into vertical velocity.
+The packet is decoded as a 16-bit sequence number, an `x,y,z,w` quaternion, and
+XYZ acceleration. Acceleration is rotated onto world Z and gravity is removed
+using the stationary calibration.
 
-- A repetition starts when sustained upward acceleration is detected.
-- The ascent ends when vertical velocity reaches zero and reverses at the top.
-- Downward travel is ignored.
-- The detector re-arms when downward velocity reaches zero at the bottom.
+The packet sequence supplies a 50 Hz sensor clock. Host Bluetooth callback times
+are deliberately not used for integration because Windows may deliver packets
+in bursts.
 
-Accelerometer-only displacement is an estimate and should be checked against a known bar travel distance.
+The detector follows four states:
+
+```text
+REST/BOTTOM -> UP -> TOP/REP -> DOWN -> BOTTOM
+```
+
+- Sustained positive vertical acceleration starts an upward phase.
+- Acceleration becoming negative means the bar is decelerating but may still be
+  moving upward.
+- The top is the point where velocity crosses from positive to negative. The
+  repetition is counted at that crossing.
+- Downward movement is ignored for repetition metrics.
+- The next bottom is where velocity crosses from negative to positive, or where
+  the bar becomes stationary after moving downward.
+
+Distance never decides whether a repetition is valid. It is calculated after
+the bottom and top boundaries are detected.
+
+## Replay a recording
+
+Replay applies the current detector to the exact saved packets without changing
+the workout history:
+
+```powershell
+.\run.ps1 replay .\outputs\recordings\bench-20260718-131804.jsonl --diagnostic
+```
+
+Use the actual filename shown when recording starts. Angle brackets such as
+`<recording>` are documentation placeholders and must not be typed literally.
 
 ## Optional sensor diagnostics
 
 `probe_imu_characteristics.py` can be used when investigating the sensor characteristics. It requires the same `.venv`.
+
+Run the automated tests with:
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+```
 
 ## Upload to GitHub
 
