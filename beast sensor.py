@@ -1,7 +1,10 @@
 import argparse
 import asyncio
+import importlib.util
 import json
 import queue
+import subprocess
+import sys
 import threading
 import time
 import webbrowser
@@ -33,6 +36,7 @@ PROJECT_DIRECTORY = Path(__file__).resolve().parent
 REPETITION_DATA_FILE = PROJECT_DIRECTORY / "beast_repetitions.json"
 EXCEL_WORKBOOK = PROJECT_DIRECTORY / "outputs" / "beast_tracker" / "Beast Workout.xlsx"
 RECORDINGS_DIRECTORY = PROJECT_DIRECTORY / "outputs" / "recordings"
+DASHBOARD_SCRIPT = PROJECT_DIRECTORY / "beast_dashboard.py"
 
 
 def load_repetitions() -> list[dict]:
@@ -282,10 +286,16 @@ class TrackerSession:
                     "top_detection",
                     "velocity",
                 )
+                suffixes = []
+                if top_detection in {
+                    "rest_orientation_fallback",
+                    "orientation_velocity_boundary",
+                }:
+                    suffixes.append("recovered top")
+                if (event.quality or {}).get("short_distance"):
+                    suffixes.append("short distance")
                 recovered_suffix = (
-                    " | recovered top"
-                    if top_detection == "rest_orientation_fallback"
-                    else ""
+                    f" | {', '.join(suffixes)}" if suffixes else ""
                 )
                 print(
                     f"{prefix} {self.rep_number:02d} | "
@@ -464,6 +474,52 @@ def run_analyze(args: argparse.Namespace) -> None:
         webbrowser.open(result.report_path.resolve().as_uri())
 
 
+def run_dashboard(args: argparse.Namespace) -> None:
+    if importlib.util.find_spec("streamlit") is None:
+        raise SystemExit(
+            "Streamlit is not installed. Run .\\setup.ps1 first."
+        )
+    command = [
+        sys.executable,
+        "-m",
+        "streamlit",
+        "run",
+        str(DASHBOARD_SCRIPT),
+        "--server.address",
+        "localhost",
+        "--server.port",
+        str(args.port),
+        "--server.headless",
+        "false",
+        "--browser.gatherUsageStats",
+        "false",
+        "--",
+        "--refresh-ms",
+        str(args.refresh_ms),
+        "--history-seconds",
+        str(args.history_seconds),
+    ]
+    if args.recording is not None:
+        command.extend(
+            ["--recording", str(args.recording.resolve())]
+        )
+    if args.exercise is not None:
+        command.extend(["--exercise", args.exercise])
+    print(
+        f"Starting Beast live dashboard at http://localhost:{args.port}"
+    )
+    print(
+        "Leave this window open. Run the sensor in a second terminal; "
+        "the dashboard will follow its newest recording."
+    )
+    try:
+        subprocess.run(command, check=True)
+    except subprocess.CalledProcessError as exc:
+        raise SystemExit(
+            f"The Streamlit dashboard stopped with exit code {exc.returncode}."
+        ) from exc
+
+
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Track and analyze Beast Sensor bar-velocity repetitions."
@@ -471,14 +527,14 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "mode",
         nargs="?",
-        choices=("live", "replay", "analyze"),
+        choices=("live", "replay", "analyze", "dashboard"),
         default="live",
     )
     parser.add_argument(
         "recording",
         nargs="?",
         type=Path,
-        help="JSONL recording to replay or analyze.",
+        help="JSONL recording to replay, analyze, or follow in the dashboard.",
     )
     recording_options = parser.add_mutually_exclusive_group()
     recording_options.add_argument(
@@ -519,6 +575,24 @@ def parse_arguments() -> argparse.Namespace:
         action="store_true",
         help="Print direction transitions, rejected motion, and true packet gaps.",
     )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8501,
+        help="Local Streamlit port for dashboard mode (default: 8501).",
+    )
+    parser.add_argument(
+        "--refresh-ms",
+        type=int,
+        default=750,
+        help="Dashboard refresh interval in milliseconds (default: 750).",
+    )
+    parser.add_argument(
+        "--history-seconds",
+        type=int,
+        default=90,
+        help="Initial visible dashboard history in seconds (default: 90).",
+    )
     args = parser.parse_args()
     if args.mode in {"replay", "analyze"} and args.recording is None:
         parser.error(
@@ -534,6 +608,18 @@ def parse_arguments() -> argparse.Namespace:
         parser.error("--expected-reps must be zero or greater.")
     if args.mode != "analyze" and args.open:
         parser.error("--open can only be used in analyze mode.")
+    if args.mode != "dashboard" and args.port != 8501:
+        parser.error("--port can only be used in dashboard mode.")
+    if args.mode != "dashboard" and args.refresh_ms != 750:
+        parser.error("--refresh-ms can only be used in dashboard mode.")
+    if args.mode != "dashboard" and args.history_seconds != 90:
+        parser.error("--history-seconds can only be used in dashboard mode.")
+    if not 1 <= args.port <= 65535:
+        parser.error("--port must be between 1 and 65535.")
+    if args.refresh_ms < 250:
+        parser.error("--refresh-ms must be at least 250.")
+    if args.history_seconds < 15:
+        parser.error("--history-seconds must be at least 15.")
     if args.mode == "live" and args.record is None and not args.no_record:
         args.record = default_recording_path()
     return args
@@ -545,6 +631,8 @@ def main() -> None:
         run_replay(args)
     elif args.mode == "analyze":
         run_analyze(args)
+    elif args.mode == "dashboard":
+        run_dashboard(args)
     else:
         asyncio.run(run_live(args))
 

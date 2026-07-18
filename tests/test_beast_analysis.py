@@ -86,6 +86,10 @@ class AnalysisReportTests(unittest.TestCase):
                 "Drift-corrected velocity",
                 "Rest confidence",
                 "Orientation change (degrees)",
+                "Orientation baseline upper band",
+                "Orientation region start threshold",
+                "Adaptive sample clock",
+                "Estimated sample rate",
                 "Movement candidates",
                 "Accepted rep",
                 "Top detection",
@@ -110,7 +114,9 @@ class AnalysisReportTests(unittest.TestCase):
                     "Time (s)",
                     "Result",
                     "Top detection",
+                    "Quality",
                     "Evidence",
+                    "Resynchronization",
                     "Reason",
                     "Duration (s)",
                     "Distance (m)",
@@ -118,14 +124,16 @@ class AnalysisReportTests(unittest.TestCase):
                     "Peak v (m/s)",
                     "Drift (m/s)",
                     "Missing",
+                    "Rate (Hz)",
+                    "Rate confidence",
                 ],
             )
             self.assertNotIn("rangeslider", layout["xaxis4"])
-            self.assertGreaterEqual(layout["height"], 1445)
-            self.assertGreaterEqual(layout["margin"]["t"], 220)
+            self.assertGreaterEqual(layout["height"], 1590)
+            self.assertGreaterEqual(layout["margin"]["t"], 250)
             self.assertEqual(layout["legend"]["xanchor"], "left")
             self.assertEqual(layout["legend"]["yanchor"], "bottom")
-            self.assertGreater(layout["legend"]["y"], 1.0)
+            self.assertEqual(layout["legend"]["y"], 1.0)
 
 
 if __name__ == "__main__":

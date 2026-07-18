@@ -53,6 +53,29 @@ class CliDefaultsTests(unittest.TestCase):
         self.assertEqual(arguments.mode, "replay")
         self.assertIsNone(arguments.record)
 
+    def test_dashboard_can_follow_the_newest_recording(self):
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "beast sensor.py",
+                "dashboard",
+                "--exercise",
+                "bench",
+                "--port",
+                "8502",
+                "--refresh-ms",
+                "500",
+            ],
+        ):
+            arguments = self.cli.parse_arguments()
+        self.assertEqual(arguments.mode, "dashboard")
+        self.assertIsNone(arguments.recording)
+        self.assertIsNone(arguments.record)
+        self.assertEqual(arguments.exercise, "bench")
+        self.assertEqual(arguments.port, 8502)
+        self.assertEqual(arguments.refresh_ms, 500)
+
 
 if __name__ == "__main__":
     unittest.main()

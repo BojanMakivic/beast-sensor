@@ -94,6 +94,60 @@ def _state_regions(records: list[dict]) -> list[tuple[str, float, float]]:
     return regions
 
 
+def _orientation_regions(
+    records: list[dict],
+) -> list[tuple[int, float, float, bool, float, float]]:
+    """Return adaptive orientation regions for report shading."""
+    regions: list[tuple[int, float, float, bool, float, float]] = []
+    active_start: float | None = None
+    active_id = 0
+    for record in records:
+        time_s = float(record["sensor_time_s"])
+        if record.get("orientation_region_started"):
+            active_start = time_s
+            active_id = int(record.get("orientation_region_id", 0))
+        if record.get("orientation_region_ended") and active_start is not None:
+            regions.append(
+                (
+                    active_id,
+                    active_start,
+                    time_s,
+                    bool(record.get("orientation_region_confirmed")),
+                    float(
+                        record.get(
+                            "orientation_region_prominence_deg",
+                            0.0,
+                        )
+                    ),
+                    float(
+                        record.get(
+                            "orientation_region_excess_area_deg_s",
+                            0.0,
+                        )
+                    ),
+                )
+            )
+            active_start = None
+    if active_start is not None and records:
+        last = records[-1]
+        regions.append(
+            (
+                active_id,
+                active_start,
+                float(last["sensor_time_s"]),
+                False,
+                float(last.get("orientation_region_prominence_deg", 0.0)),
+                float(
+                    last.get(
+                        "orientation_region_excess_area_deg_s",
+                        0.0,
+                    )
+                ),
+            )
+        )
+    return regions
+
+
 def _candidate_rows(
     events: list[TimedEvent],
 ) -> tuple[list[list[str]], int, int]:
@@ -114,21 +168,40 @@ def _candidate_rows(
         top_label = {
             "velocity": "Velocity",
             "rest_orientation_fallback": "Rest + orientation",
+            "orientation_velocity_boundary": (
+                "Orientation + velocity boundary"
+            ),
             "not_detected": "Not detected",
         }.get(top_detection, top_detection.replace("_", " ").title())
-        recovered = top_detection == "rest_orientation_fallback"
+        recovered = top_detection in {
+            "rest_orientation_fallback",
+            "orientation_velocity_boundary",
+        }
+        quality_status = str(
+            quality.get(
+                "quality_status",
+                "accepted" if event.kind == "rep" else "rejected",
+            )
+        )
         rows.append(
             [
                 f"{timed.sensor_time_s:.2f}",
                 (
-                    "Accepted (recovered)"
+                    "Accepted (short)"
+                    if quality.get("short_distance")
+                    else "Accepted (recovered)"
                     if recovered
                     else "Accepted"
                     if event.kind == "rep"
                     else "Rejected"
                 ),
                 top_label,
+                quality_status.replace("_", " ").title(),
                 str(quality.get("evidence") or "—"),
+                str(
+                    quality.get("resynchronization_reason")
+                    or "—"
+                ),
                 event.reason or "—",
                 _format_metric(metrics.get("duration_s")),
                 _format_metric(metrics.get("displacement_m")),
@@ -136,6 +209,10 @@ def _candidate_rows(
                 _format_metric(metrics.get("peak_speed_m_s")),
                 _format_metric(quality.get("drift_correction_m_s")),
                 str(quality.get("missing_samples", 0)),
+                _format_metric(
+                    quality.get("estimated_sample_rate_hz")
+                ),
+                str(quality.get("rate_confidence") or "—"),
             ]
         )
     return rows, accepted, rejected
@@ -192,7 +269,10 @@ def _add_event_markers(
             if (
                 timed.event.kind == "rep"
                 and (timed.event.quality or {}).get("top_detection")
-                == "rest_orientation_fallback"
+                in {
+                    "rest_orientation_fallback",
+                    "orientation_velocity_boundary",
+                }
             ):
                 style_kind = "recovered_rep"
             grouped.setdefault(style_kind, []).append(timed)
@@ -215,7 +295,10 @@ def _add_event_markers(
                 details.append(f"<br>{item.event.reason}")
             if quality.get("evidence"):
                 details.append(f"<br>{quality['evidence']}")
-            if quality.get("top_detection") == "rest_orientation_fallback":
+            if quality.get("top_detection") in {
+                "rest_orientation_fallback",
+                "orientation_velocity_boundary",
+            }:
                 details.append(
                     "<br>Raw final velocity: "
                     f"{float(quality.get('raw_final_velocity_m_s', 0.0)):.3f} m/s"
@@ -223,6 +306,14 @@ def _add_event_markers(
                 details.append(
                     "<br>Drift correction: "
                     f"{float(quality.get('drift_correction_m_s', 0.0)):.3f} m/s"
+                )
+                details.append(
+                    "<br>Orientation prominence: "
+                    f"{float(quality.get('orientation_region_prominence_deg', 0.0)):.1f}°"
+                )
+                details.append(
+                    "<br>Orientation excess area: "
+                    f"{float(quality.get('orientation_region_excess_area_deg_s', 0.0)):.1f} degree-seconds"
                 )
             hover.append("".join(details))
         figure.add_trace(
@@ -260,13 +351,13 @@ def _build_figure(
     times = [float(record["sensor_time_s"]) for record in records]
     candidates, accepted, rejected = _candidate_rows(events)
     if not candidates:
-        candidates = [["—"] * 11]
+        candidates = [["—"] * 15]
     table_height = max(280, 56 + 24 * len(candidates))
-    plot_row_heights = [285, 225, 185, 165]
+    plot_row_heights = [285, 225, 185, 205, 145]
     report_height = sum(plot_row_heights) + table_height + 305
 
     figure = make_subplots(
-        rows=5,
+        rows=6,
         cols=1,
         shared_xaxes=True,
         vertical_spacing=0.035,
@@ -279,6 +370,7 @@ def _build_figure(
             [{}],
             [{}],
             [{"secondary_y": True}],
+            [{}],
             [{"type": "table"}],
         ],
         subplot_titles=(
@@ -286,6 +378,7 @@ def _build_figure(
             "Velocity",
             "Upward displacement",
             "Rest and orientation",
+            "Adaptive sample clock",
             "Movement candidates",
         ),
     )
@@ -409,7 +502,10 @@ def _build_figure(
                     "color": (
                         COLORS["orientation"]
                         if quality.get("top_detection")
-                        == "rest_orientation_fallback"
+                        in {
+                            "rest_orientation_fallback",
+                            "orientation_velocity_boundary",
+                        }
                         else COLORS["corrected"]
                         if event.kind == "rep"
                         else COLORS["rejected"]
@@ -432,7 +528,10 @@ def _build_figure(
                     "color": (
                         COLORS["orientation"]
                         if quality.get("top_detection")
-                        == "rest_orientation_fallback"
+                        in {
+                            "rest_orientation_fallback",
+                            "orientation_velocity_boundary",
+                        }
                         else COLORS["corrected"]
                         if event.kind == "rep"
                         else COLORS["rejected"]
@@ -474,6 +573,75 @@ def _build_figure(
         col=1,
         secondary_y=True,
     )
+    figure.add_trace(
+        go.Scattergl(
+            x=times,
+            y=[
+                float(record.get("orientation_baseline_lower_deg", 0.0))
+                for record in records
+            ],
+            mode="lines",
+            name="Orientation baseline lower band",
+            line={"color": "#A16207", "width": 0.8, "dash": "dot"},
+        ),
+        row=4,
+        col=1,
+        secondary_y=True,
+    )
+    figure.add_trace(
+        go.Scattergl(
+            x=times,
+            y=[
+                float(record.get("orientation_baseline_upper_deg", 0.0))
+                for record in records
+            ],
+            mode="lines",
+            name="Orientation baseline upper band",
+            fill="tonexty",
+            fillcolor="rgba(217,119,6,0.10)",
+            line={"color": "#A16207", "width": 0.8, "dash": "dot"},
+        ),
+        row=4,
+        col=1,
+        secondary_y=True,
+    )
+    figure.add_trace(
+        go.Scattergl(
+            x=times,
+            y=[
+                float(record.get("orientation_start_threshold_deg", 0.0))
+                for record in records
+            ],
+            mode="lines",
+            name="Orientation region start threshold",
+            line={"color": "#B91C1C", "width": 1.0, "dash": "dash"},
+        ),
+        row=4,
+        col=1,
+        secondary_y=True,
+    )
+    figure.add_trace(
+        go.Scattergl(
+            x=times,
+            y=[
+                float(record.get("estimated_sample_rate_hz", 47.6))
+                for record in records
+            ],
+            mode="lines",
+            name="Estimated sample rate",
+            line={"color": "#4F46E5", "width": 1.5},
+            customdata=[
+                str(record.get("rate_confidence", "fallback"))
+                for record in records
+            ],
+            hovertemplate=(
+                "%{x:.2f} s<br>%{y:.3f} Hz"
+                "<br>Confidence: %{customdata}<extra></extra>"
+            ),
+        ),
+        row=5,
+        col=1,
+    )
 
     candidate_columns = list(map(list, zip(*candidates)))
     figure.add_trace(
@@ -481,8 +649,10 @@ def _build_figure(
             columnwidth=[
                 55,
                 95,
-                100,
-                205,
+                130,
+                90,
+                190,
+                180,
                 210,
                 65,
                 75,
@@ -490,13 +660,17 @@ def _build_figure(
                 75,
                 75,
                 55,
+                65,
+                75,
             ],
             header={
                 "values": [
                     "Time (s)",
                     "Result",
                     "Top detection",
+                    "Quality",
                     "Evidence",
+                    "Resynchronization",
                     "Reason",
                     "Duration (s)",
                     "Distance (m)",
@@ -504,6 +678,8 @@ def _build_figure(
                     "Peak v (m/s)",
                     "Drift (m/s)",
                     "Missing",
+                    "Rate (Hz)",
+                    "Rate confidence",
                 ],
                 "fill_color": "#172554",
                 "font": {"color": "#FFFFFF", "size": 11},
@@ -522,13 +698,13 @@ def _build_figure(
                         for row in candidates
                     ]
                 ]
-                * 11,
+                * 15,
                 "font": {"color": "#0F172A", "size": 10},
                 "align": "left",
                 "height": 24,
             },
         ),
-        row=5,
+        row=6,
         col=1,
     )
 
@@ -561,7 +737,112 @@ def _build_figure(
                 row=row,
                 col=1,
             )
+    for (
+        region_id,
+        start,
+        end,
+        confirmed,
+        prominence,
+        area,
+    ) in _orientation_regions(records):
+        if end <= start:
+            continue
+        figure.add_shape(
+            type="rect",
+            x0=start,
+            x1=end,
+            y0=0,
+            y1=1,
+            xref="x4",
+            yref="y5 domain",
+            fillcolor=(
+                "rgba(217,119,6,0.18)"
+                if confirmed
+                else "rgba(148,163,184,0.12)"
+            ),
+            opacity=1.0,
+            line={
+                "width": 1,
+                "color": (
+                    "rgba(217,119,6,0.45)"
+                    if confirmed
+                    else "rgba(100,116,139,0.35)"
+                ),
+            },
+            layer="below",
+        )
+        figure.add_annotation(
+            x=start,
+            y=1,
+            xref="x4",
+            yref="y5 domain",
+            text=(
+                f"R{region_id} · {prominence:.1f}° · "
+                f"{area:.1f}°s"
+            ),
+            showarrow=False,
+            xanchor="left",
+            yanchor="top",
+            font={"size": 9, "color": "#92400E"},
+        )
     _add_event_markers(figure, records, events)
+    provisional_tops = [
+        timed for timed in events if timed.event.kind == "provisional_top"
+    ]
+    if provisional_tops:
+        figure.add_trace(
+            go.Scatter(
+                x=[
+                    float(
+                        (timed.event.quality or {}).get(
+                            "provisional_top_s",
+                            timed.sensor_time_s,
+                        )
+                    )
+                    for timed in provisional_tops
+                ],
+                y=[
+                    float(
+                        (timed.event.quality or {}).get(
+                            "raw_velocity_m_s",
+                            0.0,
+                        )
+                    )
+                    for timed in provisional_tops
+                ],
+                mode="markers",
+                name="Provisional velocity minimum",
+                marker={
+                    "color": "#7C3AED",
+                    "symbol": "triangle-down",
+                    "size": 8,
+                },
+                customdata=[
+                    [
+                        float(
+                            (timed.event.quality or {}).get(
+                                "peak_velocity_m_s",
+                                0.0,
+                            )
+                        ),
+                        float(
+                            (timed.event.quality or {}).get(
+                                "velocity_drop_fraction",
+                                0.0,
+                            )
+                        ),
+                    ]
+                    for timed in provisional_tops
+                ],
+                hovertemplate=(
+                    "%{x:.2f} s<br>Minimum: %{y:.3f} m/s"
+                    "<br>Peak: %{customdata[0]:.3f} m/s"
+                    "<br>Drop: %{customdata[1]:.0%}<extra></extra>"
+                ),
+            ),
+            row=2,
+            col=1,
+        )
 
     expected_text = ""
     if expected_reps is not None:
@@ -576,20 +857,20 @@ def _build_figure(
                 f"<br><sup>{recording.name} · {exercise} · "
                 f"{ALGORITHM_VERSION}{expected_text}</sup>"
             ),
-            "x": 0.02,
-            "xanchor": "left",
-            "y": 0.985,
+            "x": 0.5,
+            "xanchor": "center",
+            "y": 0.995,
             "yanchor": "top",
             "font": {"size": 22},
         },
         template="plotly_white",
         height=report_height,
-        margin={"l": 75, "r": 75, "t": 220, "b": 40},
+        margin={"l": 75, "r": 75, "t": 250, "b": 40},
         hovermode="x unified",
         legend={
             "orientation": "h",
             "yanchor": "bottom",
-            "y": 1.02,
+            "y": 1.0,
             "xanchor": "left",
             "x": 0.0,
             "font": {"size": 10},
@@ -632,9 +913,15 @@ def _build_figure(
         col=1,
         secondary_y=True,
     )
+    figure.update_yaxes(
+        title_text="Rate (Hz)",
+        range=[43.0, 52.0],
+        row=5,
+        col=1,
+    )
     figure.update_xaxes(
         title_text="Sensor time (s)",
-        row=4,
+        row=5,
         col=1,
     )
     return figure, accepted, rejected
@@ -679,8 +966,7 @@ def analyze_recording(
     report_path = output_directory / (
         f"{recording.stem}-{ALGORITHM_VERSION}-{selected_exercise}.html"
     )
-    figure.write_html(
-        report_path,
+    html = figure.to_html(
         include_plotlyjs=True,
         full_html=True,
         config={
@@ -689,6 +975,17 @@ def analyze_recording(
             "scrollZoom": True,
         },
     )
+    html = html.replace(
+        "<head>",
+        (
+            "<head><style>"
+            "html,body{margin:0;overflow-x:auto;}"
+            ".plotly-graph-div{min-width:1900px;}"
+            "</style>"
+        ),
+        1,
+    )
+    report_path.write_text(html, encoding="utf-8")
     return AnalysisResult(
         report_path=report_path,
         exercise=selected_exercise,

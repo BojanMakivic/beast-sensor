@@ -88,12 +88,12 @@ local axes onto world Z. Gravity is then removed using the stationary
 calibration. This makes calibration and movement tracking independent of the
 sensor's fixed mounting angle.
 
-The packet sequence supplies the sensor clock. The selected processing rate is
-`47.6 Hz`, based on a 12-second measurement, so the tracker uses `1 / 47.6 s`
-per sequence step. Later captures have shown that actual delivery can vary by
-connection; use the read-only probe below to measure it. Host Bluetooth
-callback times are deliberately not used for integration because Windows may
-deliver packets in bursts.
+The packet sequence supplies the integration clock. `47.6 Hz` is only the
+startup fallback. During calibration and movement, the tracker estimates the
+actual rate from overlapping multi-second sequence-versus-host-time windows.
+The estimate is bounded to `43–52 Hz`, changes slowly, and is saved with a
+confidence label. Individual Bluetooth callback intervals are deliberately
+ignored because Windows may deliver packets in bursts.
 
 The detector first removes isolated spikes with a short Hampel filter, then
 smooths world-up acceleration with a causal 5 Hz Butterworth filter.
@@ -112,29 +112,38 @@ REST -> UP -> TOP/REP -> DOWN -> BOTTOM -> UP
   means the upward-moving bar is slowing down.
 - The top is detected when upward velocity returns close to zero after a clear
   velocity peak and deceleration.
+- After a positive velocity peak and three braking samples, a local velocity
+  minimum is retained when velocity falls by at least 70%. A following fused
+  orientation-and-propulsion lobe can close the previous repetition at that
+  minimum, remove drift from that lobe only, and restart velocity from zero.
 - If integration drift hides that zero-velocity top, a completed movement can
-  be recovered only after 0.5 seconds of confirmed rest, a clear
+  also be recovered after confirmed rest, a clear
   propulsion-and-braking shape, at least 10° of orientation change, valid
   profile metrics, and no missing packets. The recovered repetition is counted
   but marked `recovered top` in the console, HTML report, JSON history, and
   Excel quality column.
-- Orientation change only confirms an already detected movement. It never
-  starts or counts a repetition by itself, because one repetition can contain
-  several orientation peaks.
+- Orientation activity is measured relative to a changing local baseline band.
+  Three sustained samples above the band start a possible region. Prominence,
+  excess area, acceleration propulsion and braking must confirm it. Several
+  angle peaks remain inside one region, and orientation alone never counts a
+  repetition.
 - The start and top velocities are then forced to zero, linear integration
   drift is removed, and velocity and distance are recalculated.
 - Downward movement is ignored for repetition metrics.
 - Downward movement only re-arms the next bench or squat repetition.
-- Rest requires 0.5 seconds of low acceleration variation and less than 2° of
+- Rest requires 0.3 seconds of low acceleration variation and less than 4° of
   sensor rotation. The measured gravity value may be different from `1.0 g`.
 - The gravity baseline is relearned only during confirmed rest, and velocity is
   forced back to zero there.
-- A packet gap or invalid movement makes the detector wait for confirmed rest
-  before it starts again.
+- An invalid movement can re-synchronize at a later clean fused region instead
+  of suppressing every following continuous repetition. A packet gap still
+  invalidates the crossing candidate and requires a new clean region or rest.
 
 Very small velocity bumps, distance, duration, and incomplete movement shapes
 are checked after a candidate is found. Rejected candidates print a direct
-reason in diagnostic mode.
+reason in diagnostic mode. For bench press, corrected distance from
+`0.03–0.08 m` counts but is explicitly marked `short distance`; values below
+`0.03 m` remain rejected.
 
 ## Replay a recording
 
@@ -164,11 +173,50 @@ version.
 
 Add `--open` to open the result automatically. The self-contained HTML file
 works offline and includes synchronized zoomable panels for acceleration,
-velocity, displacement, teal rest confidence, and orange orientation change in
-degrees. It also shows state backgrounds, event markers, packet gaps, normal
-and recovered reps, rejected candidates, their evidence, and their reasons.
+velocity, displacement, teal rest confidence, orange orientation change,
+the adaptive orientation band and threshold, and estimated sample rate. It
+also shows shaded orientation regions, provisional velocity minima, recovered
+tops, state backgrounds, event markers, packet gaps, quality flags, evidence,
+resynchronization reasons, and a horizontally scrollable candidate table.
 Report generation is separate from the live Bluetooth loop, so it cannot slow
 sensor reading.
+
+## Live local dashboard
+
+The Streamlit dashboard follows the growing JSONL recording and reprocesses its
+raw `packet_hex` data with the current detector. It runs separately from the
+Bluetooth process, so drawing and browser refreshes cannot delay sensor
+notifications.
+
+Open the dashboard in one PowerShell window:
+
+```powershell
+.\run.ps1 dashboard --exercise bench
+```
+
+Streamlit opens `http://localhost:8501`. Then run the sensor in a second
+PowerShell window:
+
+```powershell
+.\run.ps1 --exercise bench
+```
+
+The dashboard automatically switches to the new recording. It updates the
+acceleration, velocity, distance, rest, adaptive orientation, and sample-rate
+graphs; shows accepted and rejected movement markers; and keeps a scrollable
+candidate table. The sidebar can pause the display, select an older recording,
+override its exercise profile, change the refresh interval, and choose how much
+recent history is visible.
+
+To follow one specific recording instead:
+
+```powershell
+.\run.ps1 dashboard .\outputs\recordings\beast-20260718-211135.jsonl --exercise bench
+```
+
+Use `--port 8502` if port 8501 is already occupied. A live recording is flushed
+to disk in small batches, so the browser will normally trail the sensor by
+about one second.
 
 For the five-repetition bench acceptance recording:
 
@@ -182,7 +230,7 @@ For the five-repetition bench acceptance recording:
 `probe_imu_characteristics.py` performs a read-only inspection of the sensor,
 lists its GATT services and readable values, and measures packet sequence rate,
 missing samples, bursty host-notification timing, and deviation from the
-tracker's selected `47.6 Hz` rate:
+tracker's `47.6 Hz` fallback rate:
 
 ```powershell
 .\.venv\Scripts\python.exe .\probe_imu_characteristics.py --duration 12

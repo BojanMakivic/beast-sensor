@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from beast_motion import (
+    AdaptiveSampleClock,
     ALGORITHM_VERSION,
     EXERCISE_PROFILES,
     ReversalRepTracker,
@@ -670,10 +671,15 @@ class ExerciseProfileTests(unittest.TestCase):
             with self.subTest(name=name):
                 tracker = ReversalRepTracker(tracker_config_for(name))
                 profile = tracker.profile
+                displacement = (
+                    0.029
+                    if name == "bench"
+                    else profile.min_displacement_m - 0.001
+                )
                 failures = tracker._metric_failures(
                     {
                         "duration_s": profile.min_duration_s + 0.2,
-                        "displacement_m": profile.min_displacement_m - 0.001,
+                        "displacement_m": displacement,
                         "average_speed_m_s": 0.5,
                         "peak_speed_m_s": max(
                             0.5,
@@ -684,6 +690,33 @@ class ExerciseProfileTests(unittest.TestCase):
                 self.assertTrue(
                     any("displacement below" in failure for failure in failures)
                 )
+
+    def test_bench_short_distance_is_countable_but_flagged(self):
+        tracker = ReversalRepTracker(tracker_config_for("bench"))
+        self.assertEqual(
+            tracker._metric_failures(
+                {
+                    "duration_s": 0.40,
+                    "displacement_m": 0.05,
+                    "average_speed_m_s": 0.125,
+                    "peak_speed_m_s": 0.20,
+                }
+            ),
+            [],
+        )
+        self.assertTrue(
+            any(
+                "displacement below" in failure
+                for failure in tracker._metric_failures(
+                    {
+                        "duration_s": 0.40,
+                        "displacement_m": 0.029,
+                        "average_speed_m_s": 0.07,
+                        "peak_speed_m_s": 0.20,
+                    }
+                )
+            )
+        )
 
     def test_each_profile_accepts_a_valid_movement_shape(self):
         for name in EXERCISE_PROFILES:
@@ -711,6 +744,43 @@ class ExerciseProfileTests(unittest.TestCase):
                     sum(event.kind == "rep" for event in events),
                     1,
                 )
+
+
+class AdaptiveSampleClockTests(unittest.TestCase):
+    def test_long_sequence_windows_adapt_across_supported_rates(self):
+        for actual_rate_hz in (44.0, 49.0):
+            with self.subTest(actual_rate_hz=actual_rate_hz):
+                clock = AdaptiveSampleClock()
+                for sequence in range(1, round(actual_rate_hz * 40.0)):
+                    clock.observe(sequence, sequence / actual_rate_hz)
+                self.assertAlmostEqual(
+                    clock.rate_hz,
+                    actual_rate_hz,
+                    delta=0.40,
+                )
+                self.assertEqual(clock.confidence, "high")
+
+    def test_bursty_or_invalid_callback_times_keep_bounded_fallback(self):
+        clock = AdaptiveSampleClock()
+        for sequence in range(1, 300):
+            host_timestamp = (
+                50.0
+                if sequence % 3 == 0
+                else 900.0 + sequence
+            )
+            clock.observe(sequence, host_timestamp)
+        self.assertGreaterEqual(clock.rate_hz, 43.0)
+        self.assertLessEqual(clock.rate_hz, 52.0)
+        self.assertAlmostEqual(clock.rate_hz, SAMPLE_RATE_HZ)
+
+    def test_new_clock_resets_estimation_after_reconnect(self):
+        clock = AdaptiveSampleClock()
+        for sequence in range(1, 1000):
+            clock.observe(sequence, sequence / 44.0)
+        self.assertLess(clock.rate_hz, SAMPLE_RATE_HZ)
+        reconnected = AdaptiveSampleClock()
+        self.assertEqual(reconnected.rate_hz, SAMPLE_RATE_HZ)
+        self.assertEqual(reconnected.confidence, "fallback")
 
 
 class RecordingTests(unittest.TestCase):

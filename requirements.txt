@@ -3,3 +3,4 @@ numpy==2.3.1
 openpyxl==3.1.5
 plotly==6.2.0
 scipy==1.16.0
+streamlit==1.59.2
