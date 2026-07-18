@@ -1,8 +1,8 @@
-<img width="1672" height="941" alt="beast landscape" src="https://github.com/user-attachments/assets/1b2a8c7c-f398-4560-8b48-43c5cca6950c" />
+<img width="1672" height="941" alt="agile vbt" src="https://github.com/user-attachments/assets/9a881f69-2876-48f6-8d0d-da033c0b74b8" />
 
 
 
-# Beast Sensor Bar-Velocity Tracker
+# Agile-VBT Bar-Velocity Tracker
 
 A Windows command-line tracker for a Beast Bluetooth Low Energy sensor. It
 counts every upward phase between the bottom and top direction reversals,
