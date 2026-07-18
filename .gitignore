@@ -1,0 +1,29 @@
+# Virtual environments
+.venv/
+Beast/
+venv/
+
+# Python caches and tooling
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Runtime measurements and generated workbooks
+beast_repetitions.json
+beast_repetitions.backup-*.json
+outputs/
+
+# Previous local Excel implementation
+tools/
+
+# Editors and operating systems
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.log
