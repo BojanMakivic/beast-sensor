@@ -1,3 +1,6 @@
+<img width="1254" height="1254" alt="beast" src="https://github.com/user-attachments/assets/aaf360cf-70d2-4e8c-8e8c-e2ec9fb6c7d1" />
+
+
 # Beast Sensor Bar-Velocity Tracker
 
 A Windows command-line tracker for a Beast Bluetooth Low Energy sensor. It connects directly to the configured sensor, detects bottom-to-top repetitions, estimates ascent time, displacement, average speed, and peak speed, and writes the results to an Excel workbook.
