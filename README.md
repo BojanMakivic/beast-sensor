@@ -41,15 +41,28 @@ required the first time dependencies are downloaded.
 .\run.ps1
 ```
 
-No exercise profile or expected distance is required. Keep the sensor still
-until calibration reports `Ready`, then start moving. Stop the tracker with
-`Ctrl+C`.
+No exercise profile or expected distance is required. The sensor may be
+mounted at any angle, but it must be rigidly attached to the bar. Keep it still
+until calibration reports `Ready`, then start moving. The live quaternion
+compensates for normal bar rotation during a repetition; sensor slippage or
+strong rotational acceleration can reduce accuracy. Stop the tracker with
+`Ctrl+C`. Plain live runs automatically save raw packets in
+`outputs/recordings/` and keep detailed state transitions hidden.
 
-To keep a raw recording and print direction transitions:
+For a bench-press session with only normal status and accepted-repetition
+output:
 
 ```powershell
-.\run.ps1 --record --diagnostic
+.\run.ps1 --exercise bench
 ```
+
+Add `--diagnostic` only when you want to see bottom, top, rest, rejected
+candidate, and packet-gap messages. Use `--no-record` if a live session should
+not save raw packets.
+
+Available profiles are `generic`, `bench`, `squat`, and `deadlift`. The profile
+only changes the movement pattern and minimum gates; the sensor mounting angle
+does not need to be entered.
 
 Each completed ascent prints:
 
@@ -61,37 +74,55 @@ The generated files are stored locally:
 
 - `beast_repetitions.json` contains accepted repetition measurements.
 - `outputs/beast_tracker/Beast Workout.xlsx` contains the formatted Excel log.
-- `outputs/recordings/*.jsonl` contains optional raw sensor recordings.
+- `outputs/recordings/*.jsonl` contains automatic raw sensor recordings.
+- `outputs/analysis/*.html` contains optional interactive movement reports.
 
 These runtime files are ignored by Git so every machine starts with a clean training log.
 
 ## How repetition detection works
 
-The packet is decoded as a 16-bit sequence number, an `x,y,z,w` quaternion, and
-XYZ acceleration. Acceleration is rotated onto world Z and gravity is removed
-using the stationary calibration.
+The packet is decoded as a 16-bit sequence number, the Beast `x,y,w,z`
+world-to-body quaternion, and XYZ acceleration. The quaternion is normalized
+and inverted so every acceleration sample can be rotated from the sensor's
+local axes onto world Z. Gravity is then removed using the stationary
+calibration. This makes calibration and movement tracking independent of the
+sensor's fixed mounting angle.
 
 The packet sequence supplies a 50 Hz sensor clock. Host Bluetooth callback times
 are deliberately not used for integration because Windows may deliver packets
 in bursts.
 
-The detector follows four states:
+The detector first removes isolated spikes with a short Hampel filter, then
+smooths world-up acceleration with a causal 5 Hz Butterworth filter.
+Acceleration is still the sensor input, but the detector integrates it into
+velocity and uses velocity to decide what the bar is doing.
+
+The detector follows these main states:
 
 ```text
-REST/BOTTOM -> UP -> TOP/REP -> DOWN -> BOTTOM
+REST -> UP -> TOP/REP -> DOWN -> BOTTOM -> UP
 ```
 
-- Sustained positive vertical acceleration starts an upward phase.
-- Acceleration becoming negative means the bar is decelerating but may still be
-  moving upward.
-- The top is the point where velocity crosses from positive to negative. The
-  repetition is counted at that crossing.
+- Four sustained acceleration samples plus at least `0.02 m/s` provisional
+  velocity start movement.
+- Negative acceleration alone does not mean the bar is moving down. It first
+  means the upward-moving bar is slowing down.
+- The top is detected when upward velocity returns close to zero after a clear
+  velocity peak and deceleration.
+- The start and top velocities are then forced to zero, linear integration
+  drift is removed, and velocity and distance are recalculated.
 - Downward movement is ignored for repetition metrics.
-- The next bottom is where velocity crosses from negative to positive, or where
-  the bar becomes stationary after moving downward.
+- Downward movement only re-arms the next bench or squat repetition.
+- Rest requires 0.5 seconds of low acceleration variation and less than 2° of
+  sensor rotation. The measured gravity value may be different from `1.0 g`.
+- The gravity baseline is relearned only during confirmed rest, and velocity is
+  forced back to zero there.
+- A packet gap or invalid movement makes the detector wait for confirmed rest
+  before it starts again.
 
-Distance never decides whether a repetition is valid. It is calculated after
-the bottom and top boundaries are detected.
+Very small velocity bumps, distance, duration, and incomplete movement shapes
+are checked after a candidate is found. Rejected candidates print a direct
+reason in diagnostic mode.
 
 ## Replay a recording
 
@@ -99,11 +130,39 @@ Replay applies the current detector to the exact saved packets without changing
 the workout history:
 
 ```powershell
-.\run.ps1 replay .\outputs\recordings\bench-20260718-131804.jsonl --diagnostic
+.\run.ps1 replay .\outputs\recordings\bench-20260718-131804.jsonl --exercise bench --diagnostic
 ```
 
 Use the actual filename shown when recording starts. Angle brackets such as
 `<recording>` are documentation placeholders and must not be typed literally.
+
+If `--exercise` is omitted during replay or analysis, the profile saved in new
+recording metadata is used. A command-line profile always wins. Older
+recordings without a profile use `generic`.
+
+## Interactive movement graph
+
+Analysis always decodes the saved `packet_hex` bytes again with the current
+algorithm. It never trusts velocity or state fields calculated by an older
+version.
+
+```powershell
+.\run.ps1 analyze .\outputs\recordings\bench-20260718-131804.jsonl --exercise bench --expected-reps 5
+```
+
+Add `--open` to open the result automatically. The self-contained HTML file
+works offline and includes synchronized zoomable panels for acceleration,
+velocity, displacement, rest confidence, and orientation change. It also shows
+state backgrounds, event markers, packet gaps, accepted reps, rejected
+candidates, and their reasons. Report generation is separate from the live
+Bluetooth loop, so it cannot slow sensor reading.
+
+For the five-repetition bench acceptance recording:
+
+1. Keep the attached sensor still for at least five seconds.
+2. Perform exactly five continuous repetitions.
+3. Keep the sensor still for at least five more seconds.
+4. Stop recording and run `analyze` with `--expected-reps 5`.
 
 ## Optional sensor diagnostics
 

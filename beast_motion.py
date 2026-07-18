@@ -1,4 +1,4 @@
-"""Signal processing for generic Beast Sensor vertical repetitions."""
+"""Velocity-based signal processing for Beast Sensor repetitions."""
 
 from __future__ import annotations
 
@@ -12,30 +12,38 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
+import numpy as np
+from scipy.signal import butter, sosfilt, sosfilt_zi
 
-ALGORITHM_VERSION = "generic-reversal-v1"
+
+ALGORITHM_VERSION = "generic-velocity-v2"
 GRAVITY_M_S2 = 9.80665
 SAMPLE_INTERVAL_S = 0.020
+SAMPLE_RATE_HZ = 1.0 / SAMPLE_INTERVAL_S
 
-# The live detector uses motion/noise thresholds, never a configured distance.
 CALIBRATION_SAMPLES = 100
 CALIBRATION_MAX_VERTICAL_STD_G = 0.010
 CALIBRATION_MIN_VERTICAL_G = 0.85
-FILTER_CUTOFF_HZ = 8.0
+FILTER_CUTOFF_HZ = 5.0
+FILTER_ORDER = 4
+HAMPEL_WINDOW_SAMPLES = 5
+HAMPEL_SIGMA = 3.0
+REST_WINDOW_SAMPLES = 25
+REST_ORIENTATION_MAX_DEG = 2.0
 MIN_START_ACCELERATION_M_S2 = 0.08
-START_CONFIRM_SAMPLES = 3
-STATIONARY_CONFIRM_SAMPLES = 8
-STATIONARY_VERTICAL_STD_G = 0.003
-STATIONARY_NORM_TOLERANCE_G = 0.08
-MIN_PEAK_VELOCITY_M_S = 0.035
-MIN_REP_DURATION_S = 0.12
-MIN_STATIONARY_PHASE_S = 0.40
-MAX_PHASE_DURATION_S = 5.0
-MAX_MISSING_SAMPLES = 1
+START_CONFIRM_SAMPLES = 4
+START_MIN_VELOCITY_M_S = 0.02
+END_CONFIRM_SAMPLES = 3
+END_MIN_VELOCITY_M_S = 0.03
+END_PEAK_FRACTION = 0.10
+DOWN_MAX_DURATION_S = 6.0
+MAX_MISSING_SAMPLES = 0
 
 
 @dataclass(frozen=True)
 class ImuSample:
+    """One decoded sample with a body-to-world x,y,z,w quaternion."""
+
     sequence: int
     host_timestamp: float
     packet_hex: str
@@ -61,13 +69,79 @@ class MotionEvent:
     reason: str | None = None
     metrics: dict[str, float] | None = None
     quality: dict[str, float | int | str] | None = None
+    trace: list[MotionPoint] | None = None
+
+
+@dataclass(frozen=True)
+class ExerciseProfile:
+    name: str
+    movement_pattern: str
+    min_duration_s: float
+    max_duration_s: float
+    min_displacement_m: float
+    min_peak_velocity_m_s: float
+
+
+EXERCISE_PROFILES: dict[str, ExerciseProfile] = {
+    "generic": ExerciseProfile(
+        "generic",
+        "either",
+        0.15,
+        5.0,
+        0.03,
+        0.10,
+    ),
+    "bench": ExerciseProfile(
+        "bench",
+        "down_then_up",
+        0.15,
+        4.0,
+        0.08,
+        0.10,
+    ),
+    "squat": ExerciseProfile(
+        "squat",
+        "down_then_up",
+        0.20,
+        5.0,
+        0.10,
+        0.10,
+    ),
+    "deadlift": ExerciseProfile(
+        "deadlift",
+        "up_from_rest",
+        0.20,
+        5.0,
+        0.15,
+        0.10,
+    ),
+}
+
+
+@dataclass(frozen=True)
+class TrackerConfig:
+    profile: ExerciseProfile = EXERCISE_PROFILES["generic"]
+    rest_window_samples: int = REST_WINDOW_SAMPLES
+    rest_orientation_max_deg: float = REST_ORIENTATION_MAX_DEG
+    hampel_window_samples: int = HAMPEL_WINDOW_SAMPLES
+    filter_cutoff_hz: float = FILTER_CUTOFF_HZ
+
+
+def tracker_config_for(exercise: str) -> TrackerConfig:
+    try:
+        return TrackerConfig(profile=EXERCISE_PROFILES[exercise])
+    except KeyError as exc:
+        choices = ", ".join(EXERCISE_PROFILES)
+        raise ValueError(
+            f"Unknown exercise profile '{exercise}'. Choose from: {choices}."
+        ) from exc
 
 
 def rotate_body_to_world(
     quaternion_xyzw: tuple[float, float, float, float],
     vector: tuple[float, float, float],
 ) -> tuple[float, float, float]:
-    """Rotate a body-frame vector using the sensor's x,y,z,w quaternion."""
+    """Rotate a body-frame vector using a body-to-world x,y,z,w quaternion."""
     x, y, z, w = quaternion_xyzw
     vx, vy, vz = vector
     return (
@@ -87,22 +161,38 @@ def decode_imu_packet(
     data: bytes | bytearray,
     host_timestamp: float,
 ) -> ImuSample | None:
-    """Decode sequence, x/y/z/w quaternion, and acceleration from one packet."""
+    """Decode a Beast packet into world-oriented acceleration.
+
+    Beast sends its world-to-body quaternion as x,y,w,z. Conjugating it yields
+    the body-to-world x,y,z,w quaternion used everywhere else in the tracker.
+    """
     if len(data) < 16:
         return None
 
-    sequence, qx, qy, qz, qw, ax, ay, az = struct.unpack(
-        "<Hhhhhhhh", bytes(data[:16])
+    (
+        sequence,
+        device_qx,
+        device_qy,
+        device_qw,
+        device_qz,
+        ax,
+        ay,
+        az,
+    ) = struct.unpack("<Hhhhhhhh", bytes(data[:16]))
+    quaternion_norm = math.sqrt(
+        device_qx * device_qx
+        + device_qy * device_qy
+        + device_qz * device_qz
+        + device_qw * device_qw
     )
-    quaternion_norm = math.sqrt(qx * qx + qy * qy + qz * qz + qw * qw)
     if quaternion_norm == 0.0:
         return None
 
     quaternion = (
-        qx / quaternion_norm,
-        qy / quaternion_norm,
-        qz / quaternion_norm,
-        qw / quaternion_norm,
+        -device_qx / quaternion_norm,
+        -device_qy / quaternion_norm,
+        -device_qz / quaternion_norm,
+        device_qw / quaternion_norm,
     )
     acceleration = (ax / 1000.0, ay / 1000.0, az / 1000.0)
     return ImuSample(
@@ -116,15 +206,19 @@ def decode_imu_packet(
 
 
 class ReversalRepTracker:
-    """Count upward phases from bottom velocity reversal to top reversal."""
+    """Detect concentric repetitions from a drift-corrected velocity curve."""
 
     CALIBRATING = "calibrating"
     REST = "rest"
     UP = "up"
     DOWN = "down"
+    RECOVERY = "recovery"
 
-    def __init__(self) -> None:
+    def __init__(self, config: TrackerConfig | None = None) -> None:
+        self.config = config or TrackerConfig()
+        self.profile = self.config.profile
         self.state = self.CALIBRATING
+
         self.calibration_values: deque[float] = deque(maxlen=CALIBRATION_SAMPLES)
         self.calibration_horizontal: deque[float] = deque(
             maxlen=CALIBRATION_SAMPLES
@@ -135,28 +229,56 @@ class ReversalRepTracker:
         self.start_threshold_m_s2 = MIN_START_ACCELERATION_M_S2
         self.stationary_threshold_m_s2 = 0.05
 
+        self.filter_sos = butter(
+            FILTER_ORDER,
+            self.config.filter_cutoff_hz,
+            btype="lowpass",
+            fs=SAMPLE_RATE_HZ,
+            output="sos",
+        )
+        self.filter_initial_state = sosfilt_zi(self.filter_sos)
+        self.filter_state = self.filter_initial_state * 0.0
+        self.hampel_values: deque[float] = deque(
+            maxlen=self.config.hampel_window_samples
+        )
+
+        self.rest_vertical_g: deque[float] = deque(
+            maxlen=self.config.rest_window_samples
+        )
+        self.rest_world_acceleration_g: deque[
+            tuple[float, float, float]
+        ] = deque(maxlen=self.config.rest_window_samples)
+        self.rest_quaternions: deque[tuple[float, float, float, float]] = deque(
+            maxlen=self.config.rest_window_samples
+        )
+        self.rest_confirmed = False
+        self.rest_confidence = 0.0
+        self.rest_acceleration_variation_m_s2 = 0.0
+        self.orientation_change_deg = 0.0
+
         self.last_sequence: int | None = None
         self.sensor_time_s = 0.0
+        self.raw_acceleration_m_s2 = 0.0
         self.filtered_acceleration_m_s2 = 0.0
         self.previous_acceleration_m_s2 = 0.0
         self.velocity_m_s = 0.0
         self.displacement_m = 0.0
+
         self.phase_started_s = 0.0
         self.phase_points: list[MotionPoint] = []
         self.phase_peak_velocity_m_s = 0.0
         self.phase_missed_samples = 0
         self.deceleration_seen = False
+        self.end_candidate_samples = 0
         self.downward_motion_seen = False
+        self.down_peak_velocity_m_s = 0.0
+        self.bottom_candidate_samples = 0
 
         self.positive_start_samples: list[float] = []
         self.negative_start_samples: list[float] = []
-        self.stationary_samples = 0
-        self.stationary_vertical_g: deque[float] = deque(
-            maxlen=STATIONARY_CONFIRM_SAMPLES
-        )
-        self.stationary_norm_g: deque[float] = deque(
-            maxlen=STATIONARY_CONFIRM_SAMPLES
-        )
+        self.start_buffer_from_bottom = False
+        self.phase_started_from_bottom = False
+        self.upward_armed = True
         self.total_missing_samples = 0
         self.duplicate_packets = 0
 
@@ -184,10 +306,14 @@ class ReversalRepTracker:
                 self.UP,
                 self.DOWN,
             }:
-                self._reset_to_rest()
                 events.append(
-                    MotionEvent("rejected", "motion interrupted by missing samples")
+                    MotionEvent(
+                        "rejected",
+                        "motion interrupted by missing samples; waiting for rest",
+                        quality=self._phase_quality("rejected"),
+                    )
                 )
+                self._enter_recovery()
 
         sample_dt = sequence_delta * SAMPLE_INTERVAL_S
         self.sensor_time_s += sample_dt
@@ -197,39 +323,29 @@ class ReversalRepTracker:
             if ready is not None:
                 events.append(ready)
             return events, self._record(
-                sample, state_before, sequence_delta, sample_dt
+                sample,
+                state_before,
+                sequence_delta,
+                sample_dt,
             )
 
         assert self.gravity_baseline_g is not None
-        raw_acceleration = (
+        self.raw_acceleration_m_s2 = (
             self.gravity_sign * (sample.vertical_g - self.gravity_baseline_g)
             * GRAVITY_M_S2
         )
-        alpha = 1.0 - math.exp(
-            -2.0 * math.pi * FILTER_CUTOFF_HZ * SAMPLE_INTERVAL_S
-        )
-        self.filtered_acceleration_m_s2 += alpha * (
-            raw_acceleration - self.filtered_acceleration_m_s2
-        )
-        self.stationary_vertical_g.append(sample.vertical_g)
-        self.stationary_norm_g.append(
-            math.sqrt(sum(value * value for value in sample.acceleration_g))
-        )
-        stationary = (
-            len(self.stationary_vertical_g) == STATIONARY_CONFIRM_SAMPLES
-            and statistics.pstdev(self.stationary_vertical_g)
-            <= STATIONARY_VERTICAL_STD_G
-            and abs(statistics.median(self.stationary_norm_g) - 1.0)
-            <= STATIONARY_NORM_TOLERANCE_G
-        )
-        self.stationary_samples = self.stationary_samples + 1 if stationary else 0
+        hampel_value = self._hampel_filter(self.raw_acceleration_m_s2)
+        self.filtered_acceleration_m_s2 = self._butterworth_filter(hampel_value)
+        self._update_rest_status(sample)
 
         if self.state == self.REST:
-            self._handle_rest(sample, events)
+            self._handle_rest(events)
         elif self.state == self.UP:
             self._handle_up(sample_dt, events)
-        else:
+        elif self.state == self.DOWN:
             self._handle_down(sample_dt, events)
+        else:
+            self._handle_recovery(events)
 
         self.previous_acceleration_m_s2 = self.filtered_acceleration_m_s2
         return events, self._record(
@@ -237,7 +353,7 @@ class ReversalRepTracker:
             state_before,
             sequence_delta,
             sample_dt,
-            raw_acceleration,
+            self.raw_acceleration_m_s2,
         )
 
     def _sequence_delta(self, sequence: int) -> int:
@@ -284,54 +400,157 @@ class ReversalRepTracker:
             4.0 * self.noise_m_s2,
         )
         self.state = self.REST
-        self.filtered_acceleration_m_s2 = 0.0
-        self.previous_acceleration_m_s2 = 0.0
+        self._reset_filter()
+        self._clear_motion()
         return MotionEvent(
             "ready",
             quality={
                 "gravity_baseline_g": baseline,
                 "vertical_noise_m_s2": self.noise_m_s2,
                 "start_threshold_m_s2": self.start_threshold_m_s2,
-                "sample_rate_hz": 1.0 / SAMPLE_INTERVAL_S,
+                "stationary_threshold_m_s2": self.stationary_threshold_m_s2,
+                "sample_rate_hz": SAMPLE_RATE_HZ,
+                "exercise_profile": self.profile.name,
             },
         )
 
-    def _handle_rest(
-        self,
-        sample: ImuSample,
-        events: list[MotionEvent],
-    ) -> None:
+    def _hampel_filter(self, value: float) -> float:
+        self.hampel_values.append(value)
+        if len(self.hampel_values) < self.config.hampel_window_samples:
+            return value
+        values = list(self.hampel_values)
+        median = statistics.median(values)
+        mad = statistics.median(abs(item - median) for item in values)
+        robust_sigma = max(1.4826 * mad, self.noise_m_s2, 0.005)
+        if abs(value - median) > HAMPEL_SIGMA * robust_sigma:
+            return median
+        return value
+
+    def _butterworth_filter(self, value: float) -> float:
+        filtered, self.filter_state = sosfilt(
+            self.filter_sos,
+            np.asarray([value], dtype=float),
+            zi=self.filter_state,
+        )
+        return float(filtered[0])
+
+    def _reset_filter(self) -> None:
+        self.filter_state = self.filter_initial_state * 0.0
+        self.hampel_values.clear()
+        self.filtered_acceleration_m_s2 = 0.0
+        self.previous_acceleration_m_s2 = 0.0
+
+    def _update_rest_status(self, sample: ImuSample) -> None:
+        self.rest_vertical_g.append(sample.vertical_g)
+        self.rest_world_acceleration_g.append(sample.world_acceleration_g)
+        self.rest_quaternions.append(sample.quaternion_xyzw)
+        if len(self.rest_vertical_g) < self.config.rest_window_samples:
+            self.rest_confirmed = False
+            self.rest_confidence = 0.0
+            self.rest_acceleration_variation_m_s2 = 0.0
+            self.orientation_change_deg = 0.0
+            return
+
+        axis_variances_g2 = [
+            statistics.pvariance(
+                acceleration[axis]
+                for acceleration in self.rest_world_acceleration_g
+            )
+            for axis in range(3)
+        ]
+        self.rest_acceleration_variation_m_s2 = (
+            math.sqrt(sum(axis_variances_g2)) * GRAVITY_M_S2
+        )
+        first_quaternion = self.rest_quaternions[0]
+        self.orientation_change_deg = max(
+            self._quaternion_angle_deg(first_quaternion, quaternion)
+            for quaternion in self.rest_quaternions
+        )
+        acceleration_ratio = (
+            self.rest_acceleration_variation_m_s2
+            / self.stationary_threshold_m_s2
+        )
+        orientation_ratio = (
+            self.orientation_change_deg
+            / self.config.rest_orientation_max_deg
+        )
+        self.rest_confidence = max(
+            0.0,
+            min(1.0, 1.0 - max(acceleration_ratio, orientation_ratio)),
+        )
+        self.rest_confirmed = (
+            self.rest_acceleration_variation_m_s2
+            <= self.stationary_threshold_m_s2
+            and self.orientation_change_deg
+            <= self.config.rest_orientation_max_deg
+        )
+
+    @staticmethod
+    def _quaternion_angle_deg(
+        first: tuple[float, float, float, float],
+        second: tuple[float, float, float, float],
+    ) -> float:
+        dot = abs(sum(left * right for left, right in zip(first, second)))
+        dot = min(1.0, max(-1.0, dot))
+        return math.degrees(2.0 * math.acos(dot))
+
+    def _handle_rest(self, events: list[MotionEvent]) -> None:
         self.velocity_m_s = 0.0
         self.displacement_m = 0.0
-        if self.stationary_samples > 0:
-            assert self.gravity_baseline_g is not None
-            self.gravity_baseline_g = statistics.median(
-                self.stationary_vertical_g
-            )
-            self.filtered_acceleration_m_s2 = 0.0
-            self.previous_acceleration_m_s2 = 0.0
+        if self.rest_confirmed:
+            self._adopt_rest_baseline()
+            if self.profile.movement_pattern == "up_from_rest":
+                self.upward_armed = True
+            self.positive_start_samples = []
+            self.negative_start_samples = []
+            self.start_buffer_from_bottom = False
+            return
 
         acceleration = self.filtered_acceleration_m_s2
         if acceleration >= self.start_threshold_m_s2:
             self.positive_start_samples.append(acceleration)
             self.negative_start_samples = []
-            if len(self.positive_start_samples) >= START_CONFIRM_SAMPLES:
+            buffered_velocity = (
+                sum(self.positive_start_samples) * SAMPLE_INTERVAL_S
+            )
+            if (
+                len(self.positive_start_samples) >= START_CONFIRM_SAMPLES
+                and buffered_velocity >= START_MIN_VELOCITY_M_S
+                and self.upward_armed
+            ):
                 self._start_up_from_rest()
-                events.append(MotionEvent("up_started", "upward acceleration"))
+                events.append(
+                    MotionEvent(
+                        "up_started",
+                        "sustained upward velocity developed",
+                    )
+                )
         elif acceleration <= -self.start_threshold_m_s2:
             self.negative_start_samples.append(acceleration)
             self.positive_start_samples = []
-            if len(self.negative_start_samples) >= START_CONFIRM_SAMPLES:
+            self.start_buffer_from_bottom = False
+            buffered_velocity = (
+                sum(self.negative_start_samples) * SAMPLE_INTERVAL_S
+            )
+            if (
+                len(self.negative_start_samples) >= START_CONFIRM_SAMPLES
+                and buffered_velocity <= -START_MIN_VELOCITY_M_S
+            ):
                 self._start_down_from_rest()
                 events.append(
-                    MotionEvent("down_started", "initial movement is downward")
+                    MotionEvent(
+                        "down_started",
+                        "sustained downward velocity developed",
+                    )
                 )
         else:
             self.positive_start_samples = []
             self.negative_start_samples = []
+            self.start_buffer_from_bottom = False
 
     def _start_up_from_rest(self) -> None:
         buffered = list(self.positive_start_samples)
+        self.phase_started_from_bottom = self.start_buffer_from_bottom
         self.state = self.UP
         self.phase_started_s = self.sensor_time_s - (
             len(buffered) - 1
@@ -358,32 +577,41 @@ class ReversalRepTracker:
             previous_acceleration = acceleration
         self.previous_acceleration_m_s2 = buffered[-1]
         self.phase_peak_velocity_m_s = max(
-            (point.velocity_m_s for point in self.phase_points),
-            default=0.0,
+            point.velocity_m_s for point in self.phase_points
         )
         self.phase_missed_samples = 0
         self.deceleration_seen = False
+        self.end_candidate_samples = 0
         self.positive_start_samples = []
         self.negative_start_samples = []
-        self.stationary_samples = 0
+        self.start_buffer_from_bottom = False
 
     def _start_down_from_rest(self) -> None:
+        buffered = list(self.negative_start_samples)
         self.state = self.DOWN
+        self.phase_started_s = self.sensor_time_s - (
+            len(buffered) - 1
+        ) * SAMPLE_INTERVAL_S
         self.velocity_m_s = 0.0
         self.displacement_m = 0.0
-        self.phase_started_s = self.sensor_time_s
+        previous_acceleration = buffered[0]
+        for acceleration in buffered[1:]:
+            self.velocity_m_s += 0.5 * (
+                previous_acceleration + acceleration
+            ) * SAMPLE_INTERVAL_S
+            previous_acceleration = acceleration
+        self.previous_acceleration_m_s2 = buffered[-1]
         self.phase_missed_samples = 0
-        self.downward_motion_seen = False
-        self.previous_acceleration_m_s2 = self.negative_start_samples[-1]
+        self.down_peak_velocity_m_s = self.velocity_m_s
+        self.downward_motion_seen = (
+            self.velocity_m_s <= -self.profile.min_peak_velocity_m_s
+        )
+        self.bottom_candidate_samples = 0
         self.positive_start_samples = []
         self.negative_start_samples = []
-        self.stationary_samples = 0
+        self.start_buffer_from_bottom = False
 
-    def _handle_up(
-        self,
-        dt: float,
-        events: list[MotionEvent],
-    ) -> None:
+    def _handle_up(self, dt: float, events: list[MotionEvent]) -> None:
         previous_velocity = self.velocity_m_s
         self.velocity_m_s += 0.5 * (
             self.previous_acceleration_m_s2
@@ -404,80 +632,215 @@ class ReversalRepTracker:
             self.deceleration_seen = True
 
         established = (
-            self.phase_peak_velocity_m_s >= MIN_PEAK_VELOCITY_M_S
-            and elapsed >= MIN_REP_DURATION_S
+            self.phase_peak_velocity_m_s
+            >= START_MIN_VELOCITY_M_S
+            and elapsed >= self.profile.min_duration_s
         )
-        top_crossing = (
+        end_velocity = max(
+            END_MIN_VELOCITY_M_S,
+            END_PEAK_FRACTION * self.phase_peak_velocity_m_s,
+        )
+        close_to_top = (
+            established
+            and self.deceleration_seen
+            and self.velocity_m_s <= end_velocity
+        )
+        self.end_candidate_samples = (
+            self.end_candidate_samples + 1 if close_to_top else 0
+        )
+        crossed_zero = (
             established
             and self.deceleration_seen
             and previous_velocity > 0.0
             and self.velocity_m_s <= 0.0
         )
-        if top_crossing:
-            metrics = self._metrics_at_zero_crossing(
-                previous_velocity,
-                self.velocity_m_s,
-                dt,
-            )
-            quality: dict[str, float | int | str] = {
-                "quality_status": (
-                    "accepted"
-                    if self.phase_missed_samples == 0
-                    else "accepted_with_missing_samples"
-                ),
-                "missing_samples": self.phase_missed_samples,
-                "vertical_noise_m_s2": self.noise_m_s2,
-            }
-            events.append(
-                MotionEvent("rep", metrics=metrics, quality=quality)
-            )
-            events.append(MotionEvent("top", "velocity changed from up to down"))
-            self._enter_down_after_top()
-            return
-
-        if self.stationary_samples > 0 and elapsed >= MIN_STATIONARY_PHASE_S:
-            assert self.gravity_baseline_g is not None
-            self.gravity_baseline_g = statistics.median(
-                self.stationary_vertical_g
-            )
-            events.append(
-                MotionEvent("rest", "stationary before a top reversal")
-            )
-            self._reset_to_rest()
-            return
-
-        if elapsed >= MAX_PHASE_DURATION_S:
-            events.append(
-                MotionEvent("rejected", "upward phase had no top reversal")
-            )
-            self._reset_to_rest()
-
-    def _metrics_at_zero_crossing(
-        self,
-        previous_velocity: float,
-        current_velocity: float,
-        dt: float,
-    ) -> dict[str, float]:
-        denominator = previous_velocity - current_velocity
-        fraction = (
-            previous_velocity / denominator if denominator > 0.0 else 1.0
+        stable_top = (
+            established
+            and self.deceleration_seen
+            and self.rest_confirmed
+            and self.velocity_m_s <= max(end_velocity, 0.15)
         )
-        fraction = min(1.0, max(0.0, fraction))
-        top_time = self.sensor_time_s - dt + fraction * dt
-        duration = top_time - self.phase_started_s
-        displacement = self.phase_points[-2].displacement_m
-        displacement += 0.5 * previous_velocity * fraction * dt
-        return {
+        if (
+            crossed_zero
+            or stable_top
+            or self.end_candidate_samples >= END_CONFIRM_SAMPLES
+        ):
+            self._finish_up(events)
+            return
+
+        if self.rest_confirmed:
+            assert self.gravity_baseline_g is not None
+            baseline_shift_m_s2 = (
+                abs(
+                    statistics.median(self.rest_vertical_g)
+                    - self.gravity_baseline_g
+                )
+                * GRAVITY_M_S2
+            )
+            if (
+                not self.deceleration_seen
+                and elapsed >= 0.50
+                and baseline_shift_m_s2 >= self.start_threshold_m_s2
+            ):
+                self._adopt_rest_baseline()
+                self.state = self.REST
+                self._clear_motion()
+                events.append(
+                    MotionEvent(
+                        "rest",
+                        "stable gravity baseline reacquired",
+                    )
+                )
+                return
+            if (
+                self.phase_started_from_bottom
+                and elapsed >= 0.75
+            ):
+                events.append(
+                    MotionEvent(
+                        "rejected",
+                        (
+                            "bottom braking impulse settled without an "
+                            "upward top; detector re-armed"
+                        ),
+                        quality=self._phase_quality("rejected"),
+                    )
+                )
+                self._adopt_rest_baseline()
+                self._enter_rest(upward_armed=True)
+                events.append(
+                    MotionEvent(
+                        "rest",
+                        "confirmed rest after bottom braking",
+                    )
+                )
+                return
+
+        if elapsed >= self.profile.max_duration_s:
+            events.append(
+                MotionEvent(
+                    "rejected",
+                    "upward phase had no valid top; waiting for rest",
+                    quality=self._phase_quality("rejected"),
+                )
+            )
+            self._enter_recovery()
+
+    def _finish_up(self, events: list[MotionEvent]) -> None:
+        metrics, corrected_trace, drift = self._corrected_phase_metrics()
+        failures = self._metric_failures(metrics)
+        quality = self._phase_quality(
+            "accepted" if not failures else "rejected",
+            drift,
+        )
+        if failures:
+            events.append(
+                MotionEvent(
+                    "rejected",
+                    "; ".join(failures),
+                    metrics=metrics,
+                    quality=quality,
+                    trace=corrected_trace,
+                )
+            )
+        else:
+            events.append(
+                MotionEvent(
+                    "rep",
+                    metrics=metrics,
+                    quality=quality,
+                    trace=corrected_trace,
+                )
+            )
+        events.append(
+            MotionEvent(
+                "top",
+                "upward velocity returned to zero",
+                metrics=metrics,
+                quality=quality,
+            )
+        )
+        self._enter_down_after_top()
+
+    def _corrected_phase_metrics(
+        self,
+    ) -> tuple[dict[str, float], list[MotionPoint], float]:
+        duration = self.phase_points[-1].elapsed_s
+        final_raw_velocity = self.phase_points[-1].velocity_m_s
+        corrected_points: list[MotionPoint] = []
+        previous_time = 0.0
+        previous_velocity = 0.0
+        displacement = 0.0
+        peak_velocity = 0.0
+        for point in self.phase_points:
+            progress = point.elapsed_s / duration if duration > 0.0 else 0.0
+            corrected_velocity = max(
+                0.0,
+                point.velocity_m_s - final_raw_velocity * progress,
+            )
+            dt = point.elapsed_s - previous_time
+            displacement += 0.5 * (
+                previous_velocity + corrected_velocity
+            ) * dt
+            corrected_points.append(
+                MotionPoint(
+                    point.elapsed_s,
+                    corrected_velocity,
+                    displacement,
+                )
+            )
+            previous_time = point.elapsed_s
+            previous_velocity = corrected_velocity
+            peak_velocity = max(peak_velocity, corrected_velocity)
+        metrics = {
             "duration_s": duration,
-            "displacement_m": max(0.0, displacement),
+            "displacement_m": displacement,
             "average_speed_m_s": (
-                max(0.0, displacement) / duration if duration > 0.0 else 0.0
+                displacement / duration if duration > 0.0 else 0.0
             ),
-            "peak_speed_m_s": self.phase_peak_velocity_m_s,
+            "peak_speed_m_s": peak_velocity,
+        }
+        return metrics, corrected_points, final_raw_velocity
+
+    def _metric_failures(self, metrics: dict[str, float]) -> list[str]:
+        failures: list[str] = []
+        if metrics["duration_s"] < self.profile.min_duration_s:
+            failures.append(
+                f"duration below {self.profile.min_duration_s:.2f} s"
+            )
+        if metrics["duration_s"] > self.profile.max_duration_s:
+            failures.append(
+                f"duration above {self.profile.max_duration_s:.2f} s"
+            )
+        if metrics["displacement_m"] < self.profile.min_displacement_m:
+            failures.append(
+                f"displacement below {self.profile.min_displacement_m:.2f} m"
+            )
+        if metrics["peak_speed_m_s"] < self.profile.min_peak_velocity_m_s:
+            failures.append(
+                "peak velocity below "
+                f"{self.profile.min_peak_velocity_m_s:.2f} m/s"
+            )
+        return failures
+
+    def _phase_quality(
+        self,
+        status: str,
+        drift_correction_m_s: float = 0.0,
+    ) -> dict[str, float | int | str]:
+        return {
+            "quality_status": status,
+            "missing_samples": self.phase_missed_samples,
+            "vertical_noise_m_s2": self.noise_m_s2,
+            "drift_correction_m_s": drift_correction_m_s,
+            "phase_started_s": self.phase_started_s,
+            "phase_ended_s": self.sensor_time_s,
+            "exercise_profile": self.profile.name,
         }
 
     def _enter_down_after_top(self) -> None:
         self.state = self.DOWN
+        self.upward_armed = False
         self.velocity_m_s = 0.0
         self.displacement_m = 0.0
         self.phase_started_s = self.sensor_time_s
@@ -485,67 +848,136 @@ class ReversalRepTracker:
         self.phase_peak_velocity_m_s = 0.0
         self.phase_missed_samples = 0
         self.downward_motion_seen = False
+        self.down_peak_velocity_m_s = 0.0
+        self.bottom_candidate_samples = 0
         self.deceleration_seen = False
-        self.stationary_samples = 0
+        self.end_candidate_samples = 0
 
-    def _handle_down(
-        self,
-        dt: float,
-        events: list[MotionEvent],
-    ) -> None:
+    def _handle_down(self, dt: float, events: list[MotionEvent]) -> None:
         previous_velocity = self.velocity_m_s
         self.velocity_m_s += 0.5 * (
             self.previous_acceleration_m_s2
             + self.filtered_acceleration_m_s2
         ) * dt
         elapsed = self.sensor_time_s - self.phase_started_s
-        if self.velocity_m_s <= -MIN_PEAK_VELOCITY_M_S:
+        self.down_peak_velocity_m_s = min(
+            self.down_peak_velocity_m_s,
+            self.velocity_m_s,
+        )
+        if (
+            self.velocity_m_s
+            <= -self.profile.min_peak_velocity_m_s
+        ):
             self.downward_motion_seen = True
 
-        bottom_crossing = (
+        bottom_velocity = max(
+            END_MIN_VELOCITY_M_S,
+            END_PEAK_FRACTION * abs(self.down_peak_velocity_m_s),
+        )
+        close_to_bottom = (
+            self.downward_motion_seen
+            and self.filtered_acceleration_m_s2
+            >= self.start_threshold_m_s2
+            and self.velocity_m_s >= -bottom_velocity
+        )
+        self.bottom_candidate_samples = (
+            self.bottom_candidate_samples + 1 if close_to_bottom else 0
+        )
+        crossed_bottom = (
             self.downward_motion_seen
             and previous_velocity < 0.0
             and self.velocity_m_s >= 0.0
         )
-        if bottom_crossing:
+        if (
+            crossed_bottom
+            or self.bottom_candidate_samples >= END_CONFIRM_SAMPLES
+        ):
             positive_acceleration = self.filtered_acceleration_m_s2
-            self._reset_to_rest()
+            self._enter_rest(
+                upward_armed=(
+                    self.profile.movement_pattern != "up_from_rest"
+                )
+            )
             if positive_acceleration >= self.start_threshold_m_s2:
                 self.positive_start_samples = [positive_acceleration]
+                self.start_buffer_from_bottom = True
             events.append(
-                MotionEvent("bottom", "velocity changed from down to up")
+                MotionEvent(
+                    "bottom",
+                    "downward velocity returned to zero",
+                )
             )
             return
 
-        if (
-            self.downward_motion_seen
-            and self.stationary_samples > 0
-            and elapsed >= MIN_STATIONARY_PHASE_S
-        ):
-            assert self.gravity_baseline_g is not None
-            self.gravity_baseline_g = statistics.median(
-                self.stationary_vertical_g
+        if self.rest_confirmed and elapsed >= 0.50:
+            self._adopt_rest_baseline()
+            self._enter_rest(upward_armed=True)
+            events.append(
+                MotionEvent(
+                    "bottom",
+                    "confirmed rest after downward movement",
+                )
             )
-            self._reset_to_rest()
-            events.append(MotionEvent("bottom", "stationary after downward movement"))
             return
 
-        if elapsed >= MAX_PHASE_DURATION_S and not self.downward_motion_seen:
-            self._reset_to_rest()
-            events.append(MotionEvent("rest", "no downward movement detected"))
+        if elapsed >= DOWN_MAX_DURATION_S:
+            events.append(
+                MotionEvent(
+                    "rejected",
+                    "downward phase had no valid bottom; waiting for rest",
+                    quality=self._phase_quality("rejected"),
+                )
+            )
+            self._enter_recovery()
 
-    def _reset_to_rest(self) -> None:
+    def _handle_recovery(self, events: list[MotionEvent]) -> None:
+        self.velocity_m_s = 0.0
+        self.displacement_m = 0.0
+        if not self.rest_confirmed:
+            return
+        self._adopt_rest_baseline()
+        self._enter_rest(upward_armed=True)
+        events.append(
+            MotionEvent(
+                "rest",
+                "confirmed rest; detector re-armed",
+            )
+        )
+
+    def _adopt_rest_baseline(self) -> None:
+        if not self.rest_vertical_g:
+            return
+        self.gravity_baseline_g = statistics.median(self.rest_vertical_g)
+        self.gravity_sign = (
+            1.0 if self.gravity_baseline_g >= 0.0 else -1.0
+        )
+        self._reset_filter()
+
+    def _enter_rest(self, upward_armed: bool) -> None:
         self.state = self.REST
+        self.upward_armed = upward_armed
+        self._clear_motion()
+
+    def _enter_recovery(self) -> None:
+        self.state = self.RECOVERY
+        self.upward_armed = False
+        self._clear_motion()
+
+    def _clear_motion(self) -> None:
         self.velocity_m_s = 0.0
         self.displacement_m = 0.0
         self.phase_points = []
         self.phase_peak_velocity_m_s = 0.0
         self.phase_missed_samples = 0
         self.deceleration_seen = False
+        self.end_candidate_samples = 0
         self.downward_motion_seen = False
+        self.down_peak_velocity_m_s = 0.0
+        self.bottom_candidate_samples = 0
         self.positive_start_samples = []
         self.negative_start_samples = []
-        self.stationary_samples = 0
+        self.start_buffer_from_bottom = False
+        self.phase_started_from_bottom = False
 
     def _record(
         self,
@@ -567,8 +999,18 @@ class ReversalRepTracker:
             "acceleration_g": list(sample.acceleration_g),
             "world_acceleration_g": list(sample.world_acceleration_g),
             "vertical_g": sample.vertical_g,
+            "gravity_baseline_g": self.gravity_baseline_g,
             "raw_vertical_acceleration_m_s2": raw_acceleration_m_s2,
             "filtered_acceleration_m_s2": self.filtered_acceleration_m_s2,
+            "start_threshold_m_s2": self.start_threshold_m_s2,
+            "stationary_threshold_m_s2": self.stationary_threshold_m_s2,
+            "rest_confidence": self.rest_confidence,
+            "rest_confirmed": self.rest_confirmed,
+            "rest_acceleration_variation_m_s2": (
+                self.rest_acceleration_variation_m_s2
+            ),
+            "orientation_change_deg": self.orientation_change_deg,
+            "exercise_profile": self.profile.name,
             "state_before": state_before,
             "state_after": self.state,
             "velocity_m_s": self.velocity_m_s,
@@ -577,7 +1019,7 @@ class ReversalRepTracker:
 
 
 class SessionRecorder:
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, exercise: str = "generic") -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
         self.file = path.open("w", encoding="utf-8")
@@ -589,9 +1031,10 @@ class SessionRecorder:
                     timespec="seconds"
                 ),
                 "algorithm_version": ALGORITHM_VERSION,
+                "exercise_profile": exercise,
                 "sample_interval_s": SAMPLE_INTERVAL_S,
                 "packet_layout": (
-                    "<Hhhhhhhh: sequence, qx, qy, qz, qw, ax, ay, az"
+                    "<Hhhhhhhh: sequence, qx, qy, qw, qz, ax, ay, az"
                 ),
             }
         )
@@ -609,6 +1052,16 @@ class SessionRecorder:
     def close(self) -> None:
         self.file.flush()
         self.file.close()
+
+
+def recording_metadata(path: Path) -> dict:
+    with path.open(encoding="utf-8") as recording:
+        for line in recording:
+            if not line.strip():
+                continue
+            record = json.loads(line)
+            return record if record.get("type") == "metadata" else {}
+    return {}
 
 
 def replay_items(path: Path) -> Iterable[ImuSample | None]:

@@ -4,6 +4,7 @@ import json
 import queue
 import threading
 import time
+import webbrowser
 from datetime import datetime
 from pathlib import Path
 
@@ -14,11 +15,14 @@ from openpyxl.worksheet.table import Table, TableStyleInfo
 
 from beast_motion import (
     ALGORITHM_VERSION,
+    EXERCISE_PROFILES,
     MotionEvent,
     ReversalRepTracker,
     SessionRecorder,
     decode_imu_packet,
+    recording_metadata,
     replay_items,
+    tracker_config_for,
 )
 
 
@@ -207,12 +211,15 @@ class TrackerSession:
         recorder: SessionRecorder | None,
         diagnostic: bool,
         persist: bool,
+        exercise: str = "generic",
     ) -> None:
         self.updater = updater
         self.recorder = recorder
         self.diagnostic = diagnostic
         self.persist = persist
-        self.tracker = ReversalRepTracker()
+        self.exercise = exercise
+        self.config = tracker_config_for(exercise)
+        self.tracker = ReversalRepTracker(self.config)
         self.accepted = 0
         self.rejected = 0
         self.rep_number = (
@@ -225,7 +232,7 @@ class TrackerSession:
         )
 
     def reset_tracker(self, mark_recording: bool = True) -> None:
-        self.tracker = ReversalRepTracker()
+        self.tracker = ReversalRepTracker(self.config)
         if mark_recording and self.recorder is not None:
             self.recorder.mark_tracker_reset(time.perf_counter())
 
@@ -326,13 +333,24 @@ def default_recording_path() -> Path:
 
 
 async def run_live(args: argparse.Namespace) -> None:
+    exercise = args.exercise or "generic"
     updater = ExcelWorkbookUpdater()
     if not EXCEL_WORKBOOK.exists():
         updater.request_update()
-    recorder = SessionRecorder(args.record) if args.record is not None else None
+    recorder = (
+        SessionRecorder(args.record, exercise)
+        if args.record is not None
+        else None
+    )
     if recorder is not None:
         print(f"Raw recording: {recorder.path}")
-    session = TrackerSession(updater, recorder, args.diagnostic, persist=True)
+    session = TrackerSession(
+        updater,
+        recorder,
+        args.diagnostic,
+        persist=True,
+        exercise=exercise,
+    )
     try:
         while True:
             try:
@@ -350,7 +368,32 @@ async def run_live(args: argparse.Namespace) -> None:
 
 
 def run_replay(args: argparse.Namespace) -> None:
-    session = TrackerSession(None, None, args.diagnostic, persist=False)
+    try:
+        metadata = recording_metadata(args.recording)
+    except FileNotFoundError as exc:
+        raise SystemExit(f"Recording not found: {args.recording}") from exc
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise SystemExit(
+            f"Could not read recording metadata '{args.recording}': {exc}"
+        ) from exc
+    exercise = (
+        args.exercise
+        or metadata.get("exercise_profile")
+        or "generic"
+    )
+    if exercise not in EXERCISE_PROFILES:
+        print(
+            f"Unknown recorded exercise profile '{exercise}'; "
+            "using generic."
+        )
+        exercise = "generic"
+    session = TrackerSession(
+        None,
+        None,
+        args.diagnostic,
+        persist=False,
+        exercise=exercise,
+    )
     sample_count = 0
     try:
         for item in replay_items(args.recording):
@@ -371,28 +414,86 @@ def run_replay(args: argparse.Namespace) -> None:
     )
 
 
+def run_analyze(args: argparse.Namespace) -> None:
+    from beast_analysis import analyze_recording
+
+    try:
+        result = analyze_recording(
+            args.recording,
+            exercise=args.exercise,
+            expected_reps=args.expected_reps,
+        )
+    except FileNotFoundError as exc:
+        raise SystemExit(f"Recording not found: {args.recording}") from exc
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise SystemExit(
+            f"Could not analyze recording '{args.recording}': {exc}"
+        ) from exc
+    print(
+        f"Analysis complete | profile {result.exercise} | "
+        f"samples {result.sample_count} | repetitions {result.accepted_reps} | "
+        f"rejected {result.rejected_candidates}"
+    )
+    if result.expected_reps is not None:
+        status = "PASS" if result.accepted_reps == result.expected_reps else "FAIL"
+        print(
+            f"Expected repetitions {result.expected_reps} | "
+            f"detected {result.accepted_reps} | {status}"
+        )
+    print(f"Interactive report: {result.report_path}")
+    if args.open:
+        webbrowser.open(result.report_path.resolve().as_uri())
+
+
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Track generic upward Beast Sensor repetitions."
+        description="Track and analyze Beast Sensor bar-velocity repetitions."
     )
     parser.add_argument(
         "mode",
         nargs="?",
-        choices=("live", "replay"),
+        choices=("live", "replay", "analyze"),
         default="live",
     )
     parser.add_argument(
         "recording",
         nargs="?",
         type=Path,
-        help="JSONL recording to replay.",
+        help="JSONL recording to replay or analyze.",
     )
-    parser.add_argument(
+    recording_options = parser.add_mutually_exclusive_group()
+    recording_options.add_argument(
         "--record",
         nargs="?",
         type=Path,
         const=default_recording_path(),
-        help="Record live raw samples, optionally to a selected JSONL file.",
+        help=(
+            "Record live raw samples, optionally to a selected JSONL file. "
+            "Live mode records automatically."
+        ),
+    )
+    recording_options.add_argument(
+        "--no-record",
+        action="store_true",
+        help="Run live tracking without saving raw sensor packets.",
+    )
+    parser.add_argument(
+        "--exercise",
+        choices=tuple(EXERCISE_PROFILES),
+        help=(
+            "Movement profile. A command-line value overrides recording "
+            "metadata; otherwise generic is used."
+        ),
+    )
+    parser.add_argument(
+        "--expected-reps",
+        type=int,
+        help="Expected accepted repetitions for analyze mode.",
+    )
+    parser.add_argument(
+        "--open",
+        action="store_true",
+        help="Open the generated offline HTML report after analysis.",
     )
     parser.add_argument(
         "--diagnostic",
@@ -400,10 +501,22 @@ def parse_arguments() -> argparse.Namespace:
         help="Print direction transitions, rejected motion, and true packet gaps.",
     )
     args = parser.parse_args()
-    if args.mode == "replay" and args.recording is None:
-        parser.error("replay requires the actual path of a JSONL recording.")
+    if args.mode in {"replay", "analyze"} and args.recording is None:
+        parser.error(
+            f"{args.mode} requires the actual path of a JSONL recording."
+        )
     if args.mode != "live" and args.record is not None:
         parser.error("--record can only be used in live mode.")
+    if args.mode != "live" and args.no_record:
+        parser.error("--no-record can only be used in live mode.")
+    if args.mode != "analyze" and args.expected_reps is not None:
+        parser.error("--expected-reps can only be used in analyze mode.")
+    if args.expected_reps is not None and args.expected_reps < 0:
+        parser.error("--expected-reps must be zero or greater.")
+    if args.mode != "analyze" and args.open:
+        parser.error("--open can only be used in analyze mode.")
+    if args.mode == "live" and args.record is None and not args.no_record:
+        args.record = default_recording_path()
     return args
 
 
@@ -411,6 +524,8 @@ def main() -> None:
     args = parse_arguments()
     if args.mode == "replay":
         run_replay(args)
+    elif args.mode == "analyze":
+        run_analyze(args)
     else:
         asyncio.run(run_live(args))
 
