@@ -5,7 +5,7 @@ A Windows command-line tracker for a Beast Bluetooth Low Energy sensor. It conne
 ## Requirements
 
 - Windows 10 or Windows 11 with Bluetooth Low Energy
-- Python 3.13, including the Python Launcher (`py`)
+- Python 3.13
 - Beast sensor address `BE:A5:7F:30:78:68`
 
 The device address and IMU characteristic UUID are configured near the top of `beast sensor.py`.
