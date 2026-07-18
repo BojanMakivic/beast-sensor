@@ -1,5 +1,4 @@
-<img width="1672" height="941" alt="agile vbt" src="https://github.com/user-attachments/assets/2fa578f6-f29e-4bee-99a3-9d998db76f67" />
-
+<img width="1672" height="941" alt="agile vbt" src="https://github.com/user-attachments/assets/9a881f69-2876-48f6-8d0d-da033c0b74b8" />
 
 
 
