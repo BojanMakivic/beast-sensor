@@ -2,7 +2,7 @@
 
 
 
-# Beast Sensor Bar-Velocity Tracker
+# Agile-VBT Bar-Velocity Tracker
 
 A Windows command-line tracker for a Beast Bluetooth Low Energy sensor. It
 counts every upward phase between the bottom and top direction reversals,
