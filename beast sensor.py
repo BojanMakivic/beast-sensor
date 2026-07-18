@@ -109,6 +109,9 @@ def build_excel_workbook() -> None:
         if completed_at.tzinfo is not None:
             completed_at = completed_at.replace(tzinfo=None)
         quality = repetition.get("signal_quality", {})
+        quality_status = str(
+            quality.get("quality_status", "legacy")
+        ).replace("_", " ")
         values = [
             repetition["rep"],
             completed_at,
@@ -117,7 +120,7 @@ def build_excel_workbook() -> None:
             repetition["average_speed_m_s"],
             repetition["peak_speed_m_s"],
             repetition.get("algorithm_version", "legacy"),
-            quality.get("quality_status", "legacy"),
+            quality_status,
         ]
         for column, value in enumerate(values, 1):
             cell = sheet.cell(row=row_number, column=column, value=value)
@@ -256,7 +259,7 @@ class TrackerSession:
                     f"gravity {quality.get('gravity_baseline_g', 0.0):.3f} g | "
                     f"noise {quality.get('vertical_noise_m_s2', 0.0):.3f} m/s^2 | "
                     f"start {quality.get('start_threshold_m_s2', 0.0):.3f} m/s^2 | "
-                    f"{quality.get('sample_rate_hz', 0.0):.0f} Hz"
+                    f"{quality.get('sample_rate_hz', 0.0):.1f} Hz"
                 )
             elif event.kind == "rep" and event.metrics is not None:
                 self.accepted += 1
@@ -275,12 +278,22 @@ class TrackerSession:
                     if self.updater is not None:
                         self.updater.request_update()
                 prefix = "REP" if self.persist else "REPLAY REP"
+                top_detection = (event.quality or {}).get(
+                    "top_detection",
+                    "velocity",
+                )
+                recovered_suffix = (
+                    " | recovered top"
+                    if top_detection == "rest_orientation_fallback"
+                    else ""
+                )
                 print(
                     f"{prefix} {self.rep_number:02d} | "
                     f"time {event.metrics['duration_s']:.2f} s | "
                     f"displacement {event.metrics['displacement_m']:.3f} m | "
                     f"average speed {event.metrics['average_speed_m_s']:.3f} m/s | "
                     f"peak speed {event.metrics['peak_speed_m_s']:.3f} m/s"
+                    f"{recovered_suffix}"
                 )
             elif event.kind == "rejected":
                 self.rejected += 1
@@ -295,8 +308,14 @@ class TrackerSession:
                 "duplicate",
                 "rest",
             }:
+                event_time_s = float(
+                    (event.quality or {}).get(
+                        "phase_ended_s",
+                        self.tracker.sensor_time_s,
+                    )
+                )
                 print(
-                    f"{event.kind.upper()} at {self.tracker.sensor_time_s:.2f} s: "
+                    f"{event.kind.upper()} at {event_time_s:.2f} s: "
                     f"{event.reason or ''}"
                 )
 

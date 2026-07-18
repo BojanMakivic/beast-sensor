@@ -9,12 +9,13 @@ from beast_analysis import analyze_recording
 from beast_motion import (
     GRAVITY_M_S2,
     ReversalRepTracker,
+    SAMPLE_INTERVAL_S,
     SessionRecorder,
     decode_imu_packet,
 )
 
 
-DT = 0.020
+DT = SAMPLE_INTERVAL_S
 
 
 def _packet(sequence: int, acceleration_m_s2: float) -> bytes:
@@ -84,9 +85,11 @@ class AnalysisReportTests(unittest.TestCase):
                 "Filtered acceleration",
                 "Drift-corrected velocity",
                 "Rest confidence",
-                "Orientation change",
+                "Orientation change (degrees)",
                 "Movement candidates",
                 "Accepted rep",
+                "Top detection",
+                "Evidence",
                 "State: up",
             ):
                 self.assertIn(expected_text, html)
@@ -106,6 +109,8 @@ class AnalysisReportTests(unittest.TestCase):
                 [
                     "Time (s)",
                     "Result",
+                    "Top detection",
+                    "Evidence",
                     "Reason",
                     "Duration (s)",
                     "Distance (m)",

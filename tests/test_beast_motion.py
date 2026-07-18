@@ -9,6 +9,8 @@ from beast_motion import (
     ALGORITHM_VERSION,
     EXERCISE_PROFILES,
     ReversalRepTracker,
+    SAMPLE_INTERVAL_S,
+    SAMPLE_RATE_HZ,
     SessionRecorder,
     decode_imu_packet,
     recording_metadata,
@@ -18,7 +20,7 @@ from beast_motion import (
 )
 
 
-DT = 0.020
+DT = SAMPLE_INTERVAL_S
 GRAVITY = 9.80665
 IDENTITY_QUATERNION = (0.0, 0.0, 0.0, 1.0)
 
@@ -306,6 +308,103 @@ class ReversalTrackerTests(unittest.TestCase):
             sum(event.kind == "rep" for event in rep_events),
             1,
         )
+
+    def test_rest_and_orientation_recover_a_drifted_top(self):
+        tracker = ReversalRepTracker(tracker_config_for("bench"))
+        sequence, _ = rest(tracker, 0)
+
+        up_values = [
+            value + 1.20
+            for value in upward(0.35, 0.8)
+        ]
+        final_orientation = axis_angle_quaternion(
+            (1.0, 0.0, 0.0),
+            math.radians(45.0),
+        )
+        orientations = [
+            axis_angle_quaternion(
+                (1.0, 0.0, 0.0),
+                math.radians(45.0) * index / (len(up_values) - 1),
+            )
+            for index in range(len(up_values))
+        ]
+        sequence, up_events = feed_oriented_values(
+            tracker,
+            sequence,
+            up_values,
+            orientations,
+        )
+        sequence, settling_events = rest(
+            tracker,
+            sequence,
+            0.8,
+            body_to_world=final_orientation,
+        )
+        events = up_events + settling_events
+        recovered = [
+            event
+            for event in events
+            if event.kind == "rep"
+            and event.quality.get("top_detection")
+            == "rest_orientation_fallback"
+        ]
+        self.assertEqual(len(recovered), 1)
+        self.assertEqual(
+            recovered[0].quality["quality_status"],
+            "recovered_top",
+        )
+        self.assertGreater(
+            recovered[0].quality["orientation_excursion_deg"],
+            10.0,
+        )
+        self.assertAlmostEqual(recovered[0].trace[-1].velocity_m_s, 0.0)
+
+    def test_orientation_change_alone_never_counts(self):
+        orientations = [
+            axis_angle_quaternion(
+                (0.0, 1.0, 0.0),
+                math.radians(55.0)
+                * math.sin(2.0 * math.pi * index / 40.0),
+            )
+            for index in range(120)
+        ]
+        self.sequence, events = feed_oriented_values(
+            self.tracker,
+            self.sequence,
+            [0.0] * len(orientations),
+            orientations,
+        )
+        self.assertFalse(any(event.kind == "rep" for event in events))
+
+    def test_multiple_orientation_peaks_recover_only_one_rep(self):
+        tracker = ReversalRepTracker(tracker_config_for("bench"))
+        sequence, _ = rest(tracker, 0)
+        sequence, _ = feed_values(
+            tracker,
+            sequence,
+            downward(0.35, 0.9),
+        )
+        up_values = [
+            value + 0.65
+            for value in upward(0.35, 0.8)
+        ]
+        orientations = [
+            axis_angle_quaternion(
+                (1.0, 0.0, 0.0),
+                math.radians(35.0)
+                * math.sin(4.0 * math.pi * index / len(up_values)),
+            )
+            for index in range(len(up_values))
+        ]
+        sequence, movement_events = feed_oriented_values(
+            tracker,
+            sequence,
+            up_values,
+            orientations,
+        )
+        sequence, rest_events = rest(tracker, sequence, 0.8)
+        events = movement_events + rest_events
+        self.assertEqual(sum(event.kind == "rep" for event in events), 1)
 
     def test_tiny_velocity_lobe_is_rejected(self):
         self.sequence, events = feed_values(
@@ -636,6 +735,10 @@ class RecordingTests(unittest.TestCase):
 
             metadata = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
             self.assertEqual(metadata["algorithm_version"], ALGORITHM_VERSION)
+            self.assertAlmostEqual(
+                1.0 / metadata["sample_interval_s"],
+                SAMPLE_RATE_HZ,
+            )
             self.assertEqual(metadata["exercise_profile"], "bench")
             self.assertEqual(recording_metadata(path), metadata)
             self.assertIn(

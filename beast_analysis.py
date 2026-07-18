@@ -108,10 +108,27 @@ def _candidate_rows(
         rejected += event.kind == "rejected"
         metrics = event.metrics or {}
         quality = event.quality or {}
+        top_detection = str(
+            quality.get("top_detection", "not_detected")
+        )
+        top_label = {
+            "velocity": "Velocity",
+            "rest_orientation_fallback": "Rest + orientation",
+            "not_detected": "Not detected",
+        }.get(top_detection, top_detection.replace("_", " ").title())
+        recovered = top_detection == "rest_orientation_fallback"
         rows.append(
             [
                 f"{timed.sensor_time_s:.2f}",
-                "Accepted" if event.kind == "rep" else "Rejected",
+                (
+                    "Accepted (recovered)"
+                    if recovered
+                    else "Accepted"
+                    if event.kind == "rep"
+                    else "Rejected"
+                ),
+                top_label,
+                str(quality.get("evidence") or "—"),
                 event.reason or "—",
                 _format_metric(metrics.get("duration_s")),
                 _format_metric(metrics.get("displacement_m")),
@@ -160,13 +177,25 @@ def _add_event_markers(
         "down_started": ("Down", "#D97706", "triangle-down"),
         "bottom": ("Bottom", "#92400E", "triangle-up"),
         "rep": ("Accepted rep", COLORS["accepted"], "star"),
+        "recovered_rep": (
+            "Recovered rep",
+            COLORS["orientation"],
+            "diamond",
+        ),
         "rejected": ("Rejected", COLORS["rejected"], "x"),
         "gap": ("Packet gap", COLORS["gap"], "line-ns"),
     }
     grouped: dict[str, list[TimedEvent]] = {}
     for timed in events:
         if timed.event.kind in marker_styles:
-            grouped.setdefault(timed.event.kind, []).append(timed)
+            style_kind = timed.event.kind
+            if (
+                timed.event.kind == "rep"
+                and (timed.event.quality or {}).get("top_detection")
+                == "rest_orientation_fallback"
+            ):
+                style_kind = "recovered_rep"
+            grouped.setdefault(style_kind, []).append(timed)
     for kind, timed_events in grouped.items():
         label, color, symbol = marker_styles[kind]
         x_values = [item.sensor_time_s for item in timed_events]
@@ -178,17 +207,24 @@ def _add_event_markers(
             )
             for item in timed_events
         ]
-        hover = [
-            (
-                f"{label}<br>{item.sensor_time_s:.2f} s"
-                + (
-                    f"<br>{item.event.reason}"
-                    if item.event.reason
-                    else ""
+        hover = []
+        for item in timed_events:
+            quality = item.event.quality or {}
+            details = [f"{label}<br>{item.sensor_time_s:.2f} s"]
+            if item.event.reason:
+                details.append(f"<br>{item.event.reason}")
+            if quality.get("evidence"):
+                details.append(f"<br>{quality['evidence']}")
+            if quality.get("top_detection") == "rest_orientation_fallback":
+                details.append(
+                    "<br>Raw final velocity: "
+                    f"{float(quality.get('raw_final_velocity_m_s', 0.0)):.3f} m/s"
                 )
-            )
-            for item in timed_events
-        ]
+                details.append(
+                    "<br>Drift correction: "
+                    f"{float(quality.get('drift_correction_m_s', 0.0)):.3f} m/s"
+                )
+            hover.append("".join(details))
         figure.add_trace(
             go.Scatter(
                 x=x_values,
@@ -198,7 +234,11 @@ def _add_event_markers(
                 marker={
                     "color": color,
                     "symbol": symbol,
-                    "size": 10 if kind in {"rep", "rejected"} else 8,
+                    "size": (
+                        10
+                        if kind in {"rep", "recovered_rep", "rejected"}
+                        else 8
+                    ),
                     "line": {"width": 1, "color": "#FFFFFF"},
                 },
                 hovertext=hover,
@@ -220,7 +260,7 @@ def _build_figure(
     times = [float(record["sensor_time_s"]) for record in records]
     candidates, accepted, rejected = _candidate_rows(events)
     if not candidates:
-        candidates = [["—"] * 9]
+        candidates = [["—"] * 11]
     table_height = max(280, 56 + 24 * len(candidates))
     plot_row_heights = [285, 225, 185, 165]
     report_height = sum(plot_row_heights) + table_height + 305
@@ -367,7 +407,10 @@ def _build_figure(
                 showlegend=not corrected_legend_shown,
                 line={
                     "color": (
-                        COLORS["corrected"]
+                        COLORS["orientation"]
+                        if quality.get("top_detection")
+                        == "rest_orientation_fallback"
+                        else COLORS["corrected"]
                         if event.kind == "rep"
                         else COLORS["rejected"]
                     ),
@@ -387,7 +430,10 @@ def _build_figure(
                 showlegend=False,
                 line={
                     "color": (
-                        COLORS["corrected"]
+                        COLORS["orientation"]
+                        if quality.get("top_detection")
+                        == "rest_orientation_fallback"
+                        else COLORS["corrected"]
                         if event.kind == "rep"
                         else COLORS["rejected"]
                     ),
@@ -421,7 +467,7 @@ def _build_figure(
                 for record in records
             ],
             mode="lines",
-            name="Orientation change",
+            name="Orientation change (degrees)",
             line={"color": COLORS["orientation"], "width": 1.2},
         ),
         row=4,
@@ -432,11 +478,25 @@ def _build_figure(
     candidate_columns = list(map(list, zip(*candidates)))
     figure.add_trace(
         go.Table(
-            columnwidth=[60, 75, 230, 70, 80, 80, 80, 80, 65],
+            columnwidth=[
+                55,
+                95,
+                100,
+                205,
+                210,
+                65,
+                75,
+                75,
+                75,
+                75,
+                55,
+            ],
             header={
                 "values": [
                     "Time (s)",
                     "Result",
+                    "Top detection",
+                    "Evidence",
                     "Reason",
                     "Duration (s)",
                     "Distance (m)",
@@ -456,13 +516,13 @@ def _build_figure(
                     [
                         (
                             "#F0FDF4"
-                            if row[1] == "Accepted"
+                            if row[1].startswith("Accepted")
                             else "#FEF2F2"
                         )
                         for row in candidates
                     ]
                 ]
-                * 9,
+                * 11,
                 "font": {"color": "#0F172A", "size": 10},
                 "align": "left",
                 "height": 24,

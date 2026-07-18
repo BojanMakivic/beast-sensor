@@ -16,10 +16,10 @@ import numpy as np
 from scipy.signal import butter, sosfilt, sosfilt_zi
 
 
-ALGORITHM_VERSION = "generic-velocity-v2"
+ALGORITHM_VERSION = "generic-velocity-v3"
 GRAVITY_M_S2 = 9.80665
-SAMPLE_INTERVAL_S = 0.020
-SAMPLE_RATE_HZ = 1.0 / SAMPLE_INTERVAL_S
+SAMPLE_RATE_HZ = 47.6
+SAMPLE_INTERVAL_S = 1.0 / SAMPLE_RATE_HZ
 
 CALIBRATION_SAMPLES = 100
 CALIBRATION_MAX_VERTICAL_STD_G = 0.010
@@ -28,8 +28,11 @@ FILTER_CUTOFF_HZ = 5.0
 FILTER_ORDER = 4
 HAMPEL_WINDOW_SAMPLES = 5
 HAMPEL_SIGMA = 3.0
-REST_WINDOW_SAMPLES = 25
+REST_WINDOW_SAMPLES = round(0.5 * SAMPLE_RATE_HZ)
 REST_ORIENTATION_MAX_DEG = 2.0
+FALLBACK_MIN_ORIENTATION_DEG = 10.0
+FALLBACK_REST_JITTER_MULTIPLIER = 4.0
+FALLBACK_BRAKING_CONFIRM_SAMPLES = 3
 MIN_START_ACCELERATION_M_S2 = 0.08
 START_CONFIRM_SAMPLES = 4
 START_MIN_VELOCITY_M_S = 0.02
@@ -68,7 +71,7 @@ class MotionEvent:
     kind: str
     reason: str | None = None
     metrics: dict[str, float] | None = None
-    quality: dict[str, float | int | str] | None = None
+    quality: dict[str, bool | float | int | str] | None = None
     trace: list[MotionPoint] | None = None
 
 
@@ -255,6 +258,7 @@ class ReversalRepTracker:
         self.rest_confidence = 0.0
         self.rest_acceleration_variation_m_s2 = 0.0
         self.orientation_change_deg = 0.0
+        self.rest_orientation_jitter_deg = 0.0
 
         self.last_sequence: int | None = None
         self.sensor_time_s = 0.0
@@ -269,6 +273,14 @@ class ReversalRepTracker:
         self.phase_peak_velocity_m_s = 0.0
         self.phase_missed_samples = 0
         self.deceleration_seen = False
+        self.phase_propulsion_samples = 0
+        self.phase_braking_samples = 0
+        self.phase_reference_quaternion: (
+            tuple[float, float, float, float] | None
+        ) = None
+        self.phase_orientation_excursion_deg = 0.0
+        self.phase_started_from_confirmed_rest = False
+        self.fallback_rejection_evidence = ""
         self.end_candidate_samples = 0
         self.downward_motion_seen = False
         self.down_peak_velocity_m_s = 0.0
@@ -281,6 +293,8 @@ class ReversalRepTracker:
         self.upward_armed = True
         self.total_missing_samples = 0
         self.duplicate_packets = 0
+        self.motion_bout_id = 0
+        self.active_motion_bout_id: int | None = None
 
     def process(self, sample: ImuSample) -> tuple[list[MotionEvent], dict]:
         events: list[MotionEvent] = []
@@ -339,9 +353,9 @@ class ReversalRepTracker:
         self._update_rest_status(sample)
 
         if self.state == self.REST:
-            self._handle_rest(events)
+            self._handle_rest(sample, events)
         elif self.state == self.UP:
-            self._handle_up(sample_dt, events)
+            self._handle_up(sample, sample_dt, events)
         elif self.state == self.DOWN:
             self._handle_down(sample_dt, events)
         else:
@@ -484,6 +498,8 @@ class ReversalRepTracker:
             and self.orientation_change_deg
             <= self.config.rest_orientation_max_deg
         )
+        if self.rest_confirmed:
+            self.rest_orientation_jitter_deg = self.orientation_change_deg
 
     @staticmethod
     def _quaternion_angle_deg(
@@ -494,11 +510,16 @@ class ReversalRepTracker:
         dot = min(1.0, max(-1.0, dot))
         return math.degrees(2.0 * math.acos(dot))
 
-    def _handle_rest(self, events: list[MotionEvent]) -> None:
+    def _handle_rest(
+        self,
+        sample: ImuSample,
+        events: list[MotionEvent],
+    ) -> None:
         self.velocity_m_s = 0.0
         self.displacement_m = 0.0
         if self.rest_confirmed:
             self._adopt_rest_baseline()
+            self.active_motion_bout_id = None
             if self.profile.movement_pattern == "up_from_rest":
                 self.upward_armed = True
             self.positive_start_samples = []
@@ -518,7 +539,7 @@ class ReversalRepTracker:
                 and buffered_velocity >= START_MIN_VELOCITY_M_S
                 and self.upward_armed
             ):
-                self._start_up_from_rest()
+                self._start_up_from_rest(sample.quaternion_xyzw)
                 events.append(
                     MotionEvent(
                         "up_started",
@@ -548,8 +569,20 @@ class ReversalRepTracker:
             self.negative_start_samples = []
             self.start_buffer_from_bottom = False
 
-    def _start_up_from_rest(self) -> None:
+    def _start_up_from_rest(
+        self,
+        quaternion_xyzw: tuple[float, float, float, float] = (
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+        ),
+    ) -> None:
         buffered = list(self.positive_start_samples)
+        self.phase_started_from_confirmed_rest = (
+            self.active_motion_bout_id is None
+        )
+        self._begin_motion_bout()
         self.phase_started_from_bottom = self.start_buffer_from_bottom
         self.state = self.UP
         self.phase_started_s = self.sensor_time_s - (
@@ -581,6 +614,10 @@ class ReversalRepTracker:
         )
         self.phase_missed_samples = 0
         self.deceleration_seen = False
+        self.phase_propulsion_samples = len(buffered)
+        self.phase_braking_samples = 0
+        self.phase_reference_quaternion = quaternion_xyzw
+        self.phase_orientation_excursion_deg = 0.0
         self.end_candidate_samples = 0
         self.positive_start_samples = []
         self.negative_start_samples = []
@@ -588,6 +625,7 @@ class ReversalRepTracker:
 
     def _start_down_from_rest(self) -> None:
         buffered = list(self.negative_start_samples)
+        self._begin_motion_bout()
         self.state = self.DOWN
         self.phase_started_s = self.sensor_time_s - (
             len(buffered) - 1
@@ -611,7 +649,12 @@ class ReversalRepTracker:
         self.negative_start_samples = []
         self.start_buffer_from_bottom = False
 
-    def _handle_up(self, dt: float, events: list[MotionEvent]) -> None:
+    def _handle_up(
+        self,
+        sample: ImuSample,
+        dt: float,
+        events: list[MotionEvent],
+    ) -> None:
         previous_velocity = self.velocity_m_s
         self.velocity_m_s += 0.5 * (
             self.previous_acceleration_m_s2
@@ -628,8 +671,20 @@ class ReversalRepTracker:
             self.phase_peak_velocity_m_s,
             self.velocity_m_s,
         )
+        if self.phase_reference_quaternion is not None:
+            self.phase_orientation_excursion_deg = max(
+                self.phase_orientation_excursion_deg,
+                self.orientation_change_deg,
+                self._quaternion_angle_deg(
+                    self.phase_reference_quaternion,
+                    sample.quaternion_xyzw,
+                ),
+            )
+        if self.filtered_acceleration_m_s2 >= self.start_threshold_m_s2:
+            self.phase_propulsion_samples += 1
         if self.filtered_acceleration_m_s2 <= -self.start_threshold_m_s2:
             self.deceleration_seen = True
+            self.phase_braking_samples += 1
 
         established = (
             self.phase_peak_velocity_m_s
@@ -692,18 +747,23 @@ class ReversalRepTracker:
                     )
                 )
                 return
-            if (
-                self.phase_started_from_bottom
-                and elapsed >= 0.75
-            ):
+            if elapsed >= 0.75:
+                if self._finish_rest_orientation_fallback(events):
+                    return
+            if self.phase_started_from_bottom and elapsed >= 0.75:
                 events.append(
                     MotionEvent(
                         "rejected",
                         (
                             "bottom braking impulse settled without an "
-                            "upward top; detector re-armed"
+                            "upward top; fallback not accepted: "
+                            f"{self.fallback_rejection_evidence or 'requirements not met'}; "
+                            "detector re-armed"
                         ),
-                        quality=self._phase_quality("rejected"),
+                        quality=self._phase_quality(
+                            "rejected",
+                            evidence=self.fallback_rejection_evidence,
+                        ),
                     )
                 )
                 self._adopt_rest_baseline()
@@ -717,11 +777,23 @@ class ReversalRepTracker:
                 return
 
         if elapsed >= self.profile.max_duration_s:
+            fallback_detail = (
+                "; fallback not accepted: "
+                f"{self.fallback_rejection_evidence}"
+                if self.fallback_rejection_evidence
+                else ""
+            )
             events.append(
                 MotionEvent(
                     "rejected",
-                    "upward phase had no valid top; waiting for rest",
-                    quality=self._phase_quality("rejected"),
+                    (
+                        "upward phase had no valid top"
+                        f"{fallback_detail}; waiting for rest"
+                    ),
+                    quality=self._phase_quality(
+                        "rejected",
+                        evidence=self.fallback_rejection_evidence,
+                    ),
                 )
             )
             self._enter_recovery()
@@ -732,6 +804,8 @@ class ReversalRepTracker:
         quality = self._phase_quality(
             "accepted" if not failures else "rejected",
             drift,
+            top_detection="velocity",
+            evidence="velocity peak + braking + zero return",
         )
         if failures:
             events.append(
@@ -761,6 +835,105 @@ class ReversalRepTracker:
             )
         )
         self._enter_down_after_top()
+
+    def _finish_rest_orientation_fallback(
+        self,
+        events: list[MotionEvent],
+    ) -> bool:
+        """Recover a physically complete rep whose integrated velocity drifted."""
+        orientation_threshold_deg = max(
+            FALLBACK_MIN_ORIENTATION_DEG,
+            (
+                FALLBACK_REST_JITTER_MULTIPLIER
+                * self.rest_orientation_jitter_deg
+            ),
+        )
+        valid_start = (
+            self.phase_started_from_confirmed_rest
+            or self.phase_started_from_bottom
+        )
+        valid_shape = (
+            self.phase_propulsion_samples >= START_CONFIRM_SAMPLES
+            and self.deceleration_seen
+            and (
+                self.phase_braking_samples
+                >= FALLBACK_BRAKING_CONFIRM_SAMPLES
+            )
+        )
+        failures: list[str] = []
+        if not valid_start:
+            failures.append("movement did not start from rest or bottom")
+        if not valid_shape:
+            failures.append("propulsion-and-braking shape was incomplete")
+        if self.phase_missed_samples:
+            failures.append(
+                f"{self.phase_missed_samples} sensor sample(s) missing"
+            )
+        if (
+            self.phase_orientation_excursion_deg
+            < orientation_threshold_deg
+        ):
+            failures.append(
+                "orientation change "
+                f"{self.phase_orientation_excursion_deg:.1f}° below "
+                f"{orientation_threshold_deg:.1f}°"
+            )
+        if failures:
+            self.fallback_rejection_evidence = "; ".join(failures)
+            return False
+
+        metrics, corrected_trace, drift = self._corrected_phase_metrics()
+        metric_failures = self._metric_failures(metrics)
+        if metric_failures:
+            self.fallback_rejection_evidence = "; ".join(metric_failures)
+            return False
+
+        rest_duration_s = (
+            self.config.rest_window_samples * SAMPLE_INTERVAL_S
+        )
+        evidence = (
+            "velocity peak + braking + "
+            f"{self.phase_orientation_excursion_deg:.1f}° orientation + "
+            f"{rest_duration_s:.2f} s rest"
+        )
+        quality = self._phase_quality(
+            "recovered_top",
+            drift,
+            top_detection="rest_orientation_fallback",
+            evidence=evidence,
+        )
+        reason = "top recovered from confirmed rest and orientation change"
+        events.append(
+            MotionEvent(
+                "rep",
+                reason,
+                metrics=metrics,
+                quality=quality,
+                trace=corrected_trace,
+            )
+        )
+        events.append(
+            MotionEvent(
+                "top",
+                reason,
+                metrics=metrics,
+                quality=quality,
+            )
+        )
+        self._adopt_rest_baseline()
+        self.active_motion_bout_id = None
+        self._enter_rest(
+            upward_armed=(
+                self.profile.movement_pattern != "down_then_up"
+            )
+        )
+        events.append(
+            MotionEvent(
+                "rest",
+                "confirmed rest after recovered top",
+            )
+        )
+        return True
 
     def _corrected_phase_metrics(
         self,
@@ -827,16 +1000,48 @@ class ReversalRepTracker:
         self,
         status: str,
         drift_correction_m_s: float = 0.0,
-    ) -> dict[str, float | int | str]:
+        *,
+        top_detection: str = "not_detected",
+        evidence: str = "",
+    ) -> dict[str, bool | float | int | str]:
         return {
             "quality_status": status,
+            "top_detection": top_detection,
+            "evidence": evidence,
             "missing_samples": self.phase_missed_samples,
             "vertical_noise_m_s2": self.noise_m_s2,
             "drift_correction_m_s": drift_correction_m_s,
+            "raw_final_velocity_m_s": drift_correction_m_s,
+            "orientation_excursion_deg": (
+                self.phase_orientation_excursion_deg
+            ),
+            "orientation_threshold_deg": max(
+                FALLBACK_MIN_ORIENTATION_DEG,
+                (
+                    FALLBACK_REST_JITTER_MULTIPLIER
+                    * self.rest_orientation_jitter_deg
+                ),
+            ),
+            "confirmed_rest_duration_s": (
+                self.config.rest_window_samples * SAMPLE_INTERVAL_S
+                if self.rest_confirmed
+                else 0.0
+            ),
             "phase_started_s": self.phase_started_s,
             "phase_ended_s": self.sensor_time_s,
+            "phase_started_from_bottom": self.phase_started_from_bottom,
+            "phase_started_from_confirmed_rest": (
+                self.phase_started_from_confirmed_rest
+            ),
             "exercise_profile": self.profile.name,
+            "motion_bout_id": self.active_motion_bout_id or 0,
         }
+
+    def _begin_motion_bout(self) -> None:
+        if self.active_motion_bout_id is not None:
+            return
+        self.motion_bout_id += 1
+        self.active_motion_bout_id = self.motion_bout_id
 
     def _enter_down_after_top(self) -> None:
         self.state = self.DOWN
@@ -936,6 +1141,7 @@ class ReversalRepTracker:
         if not self.rest_confirmed:
             return
         self._adopt_rest_baseline()
+        self.active_motion_bout_id = None
         self._enter_rest(upward_armed=True)
         events.append(
             MotionEvent(
@@ -970,6 +1176,12 @@ class ReversalRepTracker:
         self.phase_peak_velocity_m_s = 0.0
         self.phase_missed_samples = 0
         self.deceleration_seen = False
+        self.phase_propulsion_samples = 0
+        self.phase_braking_samples = 0
+        self.phase_reference_quaternion = None
+        self.phase_orientation_excursion_deg = 0.0
+        self.phase_started_from_confirmed_rest = False
+        self.fallback_rejection_evidence = ""
         self.end_candidate_samples = 0
         self.downward_motion_seen = False
         self.down_peak_velocity_m_s = 0.0

@@ -88,9 +88,12 @@ local axes onto world Z. Gravity is then removed using the stationary
 calibration. This makes calibration and movement tracking independent of the
 sensor's fixed mounting angle.
 
-The packet sequence supplies a 50 Hz sensor clock. Host Bluetooth callback times
-are deliberately not used for integration because Windows may deliver packets
-in bursts.
+The packet sequence supplies the sensor clock. The selected processing rate is
+`47.6 Hz`, based on a 12-second measurement, so the tracker uses `1 / 47.6 s`
+per sequence step. Later captures have shown that actual delivery can vary by
+connection; use the read-only probe below to measure it. Host Bluetooth
+callback times are deliberately not used for integration because Windows may
+deliver packets in bursts.
 
 The detector first removes isolated spikes with a short Hampel filter, then
 smooths world-up acceleration with a causal 5 Hz Butterworth filter.
@@ -109,6 +112,15 @@ REST -> UP -> TOP/REP -> DOWN -> BOTTOM -> UP
   means the upward-moving bar is slowing down.
 - The top is detected when upward velocity returns close to zero after a clear
   velocity peak and deceleration.
+- If integration drift hides that zero-velocity top, a completed movement can
+  be recovered only after 0.5 seconds of confirmed rest, a clear
+  propulsion-and-braking shape, at least 10° of orientation change, valid
+  profile metrics, and no missing packets. The recovered repetition is counted
+  but marked `recovered top` in the console, HTML report, JSON history, and
+  Excel quality column.
+- Orientation change only confirms an already detected movement. It never
+  starts or counts a repetition by itself, because one repetition can contain
+  several orientation peaks.
 - The start and top velocities are then forced to zero, linear integration
   drift is removed, and velocity and distance are recalculated.
 - Downward movement is ignored for repetition metrics.
@@ -152,10 +164,11 @@ version.
 
 Add `--open` to open the result automatically. The self-contained HTML file
 works offline and includes synchronized zoomable panels for acceleration,
-velocity, displacement, rest confidence, and orientation change. It also shows
-state backgrounds, event markers, packet gaps, accepted reps, rejected
-candidates, and their reasons. Report generation is separate from the live
-Bluetooth loop, so it cannot slow sensor reading.
+velocity, displacement, teal rest confidence, and orange orientation change in
+degrees. It also shows state backgrounds, event markers, packet gaps, normal
+and recovered reps, rejected candidates, their evidence, and their reasons.
+Report generation is separate from the live Bluetooth loop, so it cannot slow
+sensor reading.
 
 For the five-repetition bench acceptance recording:
 
@@ -166,7 +179,20 @@ For the five-repetition bench acceptance recording:
 
 ## Optional sensor diagnostics
 
-`probe_imu_characteristics.py` can be used when investigating the sensor characteristics. It requires the same `.venv`.
+`probe_imu_characteristics.py` performs a read-only inspection of the sensor,
+lists its GATT services and readable values, and measures packet sequence rate,
+missing samples, bursty host-notification timing, and deviation from the
+tracker's selected `47.6 Hz` rate:
+
+```powershell
+.\.venv\Scripts\python.exe .\probe_imu_characteristics.py --duration 12
+```
+
+The inspected Beast unit does not expose a readable sample-rate setting or
+pairing PIN characteristic. A phone's normal Bluetooth settings may still ask
+for a PIN even though direct BLE communication works without pairing. The
+inspection tool never guesses a PIN and never writes to unknown
+characteristics.
 
 Run the automated tests with:
 
