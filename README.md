@@ -1,4 +1,5 @@
-<img width="1254" height="1254" alt="beast" src="https://github.com/user-attachments/assets/aaf360cf-70d2-4e8c-8e8c-e2ec9fb6c7d1" />
+<img width="1672" height="941" alt="beast landscape" src="https://github.com/user-attachments/assets/1b2a8c7c-f398-4560-8b48-43c5cca6950c" />
+
 
 
 # Beast Sensor Bar-Velocity Tracker
