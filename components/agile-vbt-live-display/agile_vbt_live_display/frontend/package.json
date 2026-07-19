@@ -1,0 +1,36 @@
+{
+  "name": "agile_vbt_live_display",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "npm run clean && npm run typecheck && npm run build:frontend:production",
+    "build:frontend:production": "cross-env NODE_ENV=production vite build",
+    "clean": "rimraf build",
+    "dev": "cross-env NODE_ENV=development vite build --watch",
+    "format": "prettier --write src/**/*.ts vite.config.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "browserslist": [
+    ">0.2%",
+    "not dead",
+    "not ie <= 11",
+    "not op_mini all"
+  ],
+  "prettier": {},
+  "dependencies": {
+    "@streamlit/component-v2-lib": "^0.2.0",
+    "plotly.js-dist-min": "^3.7.0"
+  },
+  "devDependencies": {
+    "@types/plotly.js": "^3.0.10",
+    "cross-env": "^10.1.0",
+    "jsdom": "^29.1.1",
+    "prettier": "^3.6.2",
+    "rimraf": "^6.1.0",
+    "typescript": "^6.0.3",
+    "vite": "^8.0.10",
+    "vitest": "^4.1.10"
+  }
+}

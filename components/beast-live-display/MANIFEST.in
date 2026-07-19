@@ -1,2 +1,0 @@
-recursive-include beast_live_display/frontend/build *
-include pyproject.toml

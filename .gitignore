@@ -1,6 +1,6 @@
 # Virtual environments
 .venv/
-Beast/
+AgileVBT/
 venv/
 
 # Python caches and tooling
@@ -14,8 +14,8 @@ dist/
 *.egg-info/
 
 # Runtime measurements and generated workbooks
-beast_repetitions.json
-beast_repetitions.backup-*.json
+agile_vbt_repetitions.json
+agile_vbt_repetitions.backup-*.json
 outputs/
 
 # Previous local Excel implementation

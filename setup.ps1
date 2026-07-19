@@ -6,7 +6,7 @@ $requirements = [System.IO.Path]::Combine($projectRoot, "requirements.txt")
 $dashboardComponent = [System.IO.Path]::Combine(
     $projectRoot,
     "components",
-    "beast-live-display"
+    "agile-vbt-live-display"
 )
 $pythonVersionFile = [System.IO.Path]::Combine($projectRoot, ".python-version")
 
@@ -126,7 +126,7 @@ if ($LASTEXITCODE -ne 0) { throw "Could not install project dependencies." }
 
 & $python -m pip install --editable $dashboardComponent
 if ($LASTEXITCODE -ne 0) {
-    throw "Could not install the Beast dashboard component."
+    throw "Could not install the Agile VBT dashboard component."
 }
 
 [System.Console]::WriteLine("")

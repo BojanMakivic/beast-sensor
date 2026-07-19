@@ -2,9 +2,9 @@
 
 
 
-# Agile-VBT Bar-Velocity Tracker
+# Agile VBT bar-velocity tracker
 
-A Windows command-line tracker for a Beast Bluetooth Low Energy sensor. It
+A Windows command-line tracker for the Agile VBT Bluetooth Low Energy sensor. It
 counts every upward phase between the bottom and top direction reversals,
 calculates concentric time, displacement, average velocity, and peak velocity,
 and writes accepted repetitions to an Excel workbook.
@@ -13,9 +13,9 @@ and writes accepted repetitions to an Excel workbook.
 
 - Windows 10 or Windows 11 with Bluetooth Low Energy
 - Python 3.13, matching `.python-version`
-- Beast sensor address `BE:A5:7F:30:78:68`
+- Agile VBT sensor address `BE:A5:7F:30:78:68`
 
-The device address and IMU characteristic UUID are configured near the top of `beast sensor.py`.
+The device address and IMU characteristic UUID are configured near the top of `agile_vbt_sensor.py`.
 
 ## Install
 
@@ -72,8 +72,8 @@ REP 01 | time 1.20 s | displacement 0.650 m | average speed 0.542 m/s | peak spe
 
 The generated files are stored locally:
 
-- `beast_repetitions.json` contains accepted repetition measurements.
-- `outputs/beast_tracker/Beast Workout.xlsx` contains the formatted Excel log.
+- `agile_vbt_repetitions.json` contains accepted repetition measurements.
+- `outputs/agile_vbt_tracker/Agile VBT Workout.xlsx` contains the formatted Excel log.
 - `outputs/recordings/*.jsonl` contains automatic raw sensor recordings.
 - `outputs/analysis/*.html` contains optional interactive movement reports.
 
@@ -81,7 +81,7 @@ These runtime files are ignored by Git so every machine starts with a clean trai
 
 ## How repetition detection works
 
-The packet is decoded as a 16-bit sequence number, the Beast `x,y,w,z`
+The packet is decoded as a 16-bit sequence number, the sensor's `x,y,w,z`
 world-to-body quaternion, and XYZ acceleration. The quaternion is normalized
 and inverted so every acceleration sample can be rotated from the sensor's
 local axes onto world Z. Gravity is then removed using the stationary
@@ -151,7 +151,7 @@ Replay applies the current detector to the exact saved packets without changing
 the workout history:
 
 ```powershell
-.\run.ps1 replay .\outputs\recordings\bench-20260718-131804.jsonl --exercise bench --diagnostic
+.\run.ps1 replay .\outputs\recordings\agile-vbt-20260718-131804.jsonl --exercise bench --diagnostic
 ```
 
 Use the actual filename shown when recording starts. Angle brackets such as
@@ -168,7 +168,7 @@ algorithm. It never trusts velocity or state fields calculated by an older
 version.
 
 ```powershell
-.\run.ps1 analyze .\outputs\recordings\bench-20260718-131804.jsonl --exercise bench --expected-reps 5
+.\run.ps1 analyze .\outputs\recordings\agile-vbt-20260718-131804.jsonl --exercise bench --expected-reps 5
 ```
 
 Add `--open` to open the result automatically. The self-contained HTML file
@@ -208,12 +208,15 @@ graphs; shows accepted and rejected movement markers; and keeps a scrollable
 candidate table. The sidebar can pause the display, select an older recording,
 override its exercise profile, and choose how much recent history is visible.
 Normal live updates do not rerun Streamlit, so zoom and pan remain unchanged
-and the graph does not blink.
+and the graph does not blink. A 250 ms file poll backs up Windows filesystem
+notifications, queued browser updates are merged when Plotly is busy, and a
+five-second heartbeat watchdog reconnects a stalled WebSocket automatically.
+Refreshing the page or toggling pause should not be necessary.
 
 To follow one specific recording instead:
 
 ```powershell
-.\run.ps1 dashboard .\outputs\recordings\beast-20260718-211135.jsonl --exercise bench
+.\run.ps1 dashboard .\outputs\recordings\agile-vbt-20260718-211135.jsonl --exercise bench
 ```
 
 Use `--port 8502` if port 8501 is already occupied. A live recording is flushed
@@ -239,7 +242,7 @@ tracker's `47.6 Hz` fallback rate:
 .\.venv\Scripts\python.exe .\probe_imu_characteristics.py --duration 12
 ```
 
-The inspected Beast unit does not expose a readable sample-rate setting or
+The inspected sensor unit does not expose a readable sample-rate setting or
 pairing PIN characteristic. A phone's normal Bluetooth settings may still ask
 for a PIN even though direct BLE communication works without pairing. The
 inspection tool never guesses a PIN and never writes to unknown
@@ -258,8 +261,8 @@ After preparing an empty GitHub repository:
 ```powershell
 git init
 git add .
-git commit -m "Initial portable Beast sensor tracker"
+git commit -m "Initial portable Agile VBT sensor tracker"
 git branch -M main
-git remote add origin https://github.com/YOUR-USERNAME/beast-sensor.git
+git remote add origin https://github.com/YOUR-USERNAME/agile-vbt-sensor.git
 git push -u origin main
 ```

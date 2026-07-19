@@ -1,7 +1,7 @@
 import unittest
 from pathlib import Path
 
-from beast_motion import ReversalRepTracker, replay_items, tracker_config_for
+from agile_vbt_motion import ReversalRepTracker, replay_items, tracker_config_for
 
 
 PROJECT_DIRECTORY = Path(__file__).resolve().parents[1]
@@ -9,19 +9,19 @@ LATEST_BENCH_RECORDING = (
     PROJECT_DIRECTORY
     / "outputs"
     / "recordings"
-    / "beast-20260718-200019.jsonl"
+    / "agile-vbt-20260718-200019.jsonl"
 )
 SIXTEEN_REP_BENCH_RECORDING = (
     PROJECT_DIRECTORY
     / "outputs"
     / "recordings"
-    / "beast-20260718-211135.jsonl"
+    / "agile-vbt-20260718-211135.jsonl"
 )
 
 
 @unittest.skipUnless(
     LATEST_BENCH_RECORDING.exists(),
-    "local Beast regression recording is not available",
+    "local Agile VBT regression recording is not available",
 )
 class LatestBenchRecordingRegressionTests(unittest.TestCase):
     def test_first_rest_closed_movement_is_recovered_without_recovering_gaps(
@@ -65,7 +65,7 @@ class LatestBenchRecordingRegressionTests(unittest.TestCase):
 
 @unittest.skipUnless(
     SIXTEEN_REP_BENCH_RECORDING.exists(),
-    "16-repetition Beast regression recording is not available",
+    "16-repetition Agile VBT regression recording is not available",
 )
 class SixteenRepBenchRecordingRegressionTests(unittest.TestCase):
     def test_adaptive_regions_recover_exactly_sixteen_repetitions(self):

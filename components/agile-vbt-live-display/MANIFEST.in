@@ -1,0 +1,2 @@
+recursive-include agile_vbt_live_display/frontend/build *
+include pyproject.toml

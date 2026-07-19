@@ -1,4 +1,4 @@
-"""Read-only Beast BLE inspection and notification-rate measurement."""
+"""Read-only Agile VBT BLE inspection and notification-rate measurement."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from dataclasses import dataclass
 
 from bleak import BleakClient
 
-from beast_motion import SAMPLE_RATE_HZ
+from agile_vbt_motion import SAMPLE_RATE_HZ
 
 
 DEVICE_ADDRESS = "BE:A5:7F:30:78:68"
@@ -204,7 +204,7 @@ async def inspect_sensor(
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Inspect the Beast GATT database and measure IMU packet rate "
+            "Inspect the Agile VBT GATT database and measure IMU packet rate "
             "without writing to the sensor."
         )
     )
