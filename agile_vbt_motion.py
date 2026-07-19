@@ -19,7 +19,7 @@ import numpy as np
 from scipy.signal import butter, sosfilt, sosfilt_zi
 
 
-ALGORITHM_VERSION = "generic-velocity-v4"
+ALGORITHM_VERSION = "generic-velocity-v5"
 GRAVITY_M_S2 = 9.80665
 SAMPLE_RATE_HZ = 47.6
 SAMPLE_INTERVAL_S = 1.0 / SAMPLE_RATE_HZ
@@ -59,9 +59,12 @@ ORIENTATION_MIN_RISE_DEG = 5.0
 ORIENTATION_MAD_MULTIPLIER = 4.0
 ORIENTATION_MIN_PROMINENCE_DEG = 10.0
 ORIENTATION_MIN_EXCESS_AREA_DEG_S = 8.0
+SLOW_ORIENTATION_MIN_EXCESS_AREA_DEG_S = 6.0
 PROVISIONAL_TOP_DROP_FRACTION = 0.70
 PROVISIONAL_TOP_BRAKING_SAMPLES = 3
 BENCH_SHORT_DISTANCE_MIN_M = 0.03
+BENCH_SLOW_MAX_DURATION_S = 8.0
+SLOW_BOUNDARY_MAX_AVERAGE_M_S = 0.30
 RECORDING_FLUSH_INTERVAL_S = 0.2
 RECORDING_QUEUE_MAX_RECORDS = 4096
 
@@ -462,6 +465,7 @@ class ReversalRepTracker:
         self.phase_provisional_top_index: int | None = None
         self.phase_provisional_top_velocity_m_s = 0.0
         self.phase_provisional_top_s = 0.0
+        self.phase_provisional_top_region_id = 0
         self.phase_reacceleration_samples: list[float] = []
         self.phase_orientation_region_id = 0
         self.phase_boundary_s: float | None = None
@@ -1018,6 +1022,7 @@ class ReversalRepTracker:
         self.phase_provisional_top_index = None
         self.phase_provisional_top_velocity_m_s = 0.0
         self.phase_provisional_top_s = 0.0
+        self.phase_provisional_top_region_id = 0
         self.phase_reacceleration_samples = []
         self.phase_orientation_region_id = self.orientation_region_id
         self.phase_boundary_s = None
@@ -1112,6 +1117,9 @@ class ReversalRepTracker:
             self.phase_provisional_top_index = len(self.phase_points) - 1
             self.phase_provisional_top_velocity_m_s = self.velocity_m_s
             self.phase_provisional_top_s = self.sensor_time_s
+            self.phase_provisional_top_region_id = (
+                self.orientation_region_id
+            )
             if first_provisional_top:
                 events.append(
                     MotionEvent(
@@ -1140,13 +1148,31 @@ class ReversalRepTracker:
                 )
             elif self.filtered_acceleration_m_s2 < 0.0:
                 self.phase_reacceleration_samples = []
+            provisional_point = self.phase_points[
+                self.phase_provisional_top_index
+            ]
+            provisional_average_m_s = (
+                provisional_point.displacement_m
+                / max(
+                    provisional_point.elapsed_s,
+                    self.sample_interval_s,
+                )
+            )
+            new_region_after_provisional_top = (
+                self.orientation_region_id
+                > self.phase_provisional_top_region_id
+            )
+            clearly_separate_fast_lobe = (
+                provisional_average_m_s
+                > SLOW_BOUNDARY_MAX_AVERAGE_M_S
+            )
             if (
                 len(self.phase_reacceleration_samples)
                 >= START_CONFIRM_SAMPLES
+                and self.orientation_region_active
                 and (
-                    self.orientation_region_id
-                    > self.phase_orientation_region_id
-                    or self.orientation_region_active
+                    new_region_after_provisional_top
+                    or clearly_separate_fast_lobe
                 )
             ):
                 self._finish_up_at_orientation_boundary(sample, events)
@@ -1256,7 +1282,12 @@ class ReversalRepTracker:
                 )
                 return
 
-        if elapsed >= self.profile.max_duration_s:
+        maximum_duration_s = (
+            BENCH_SLOW_MAX_DURATION_S
+            if self._slow_orientation_extension_allowed()
+            else self.profile.max_duration_s
+        )
+        if elapsed >= maximum_duration_s:
             fallback_detail = (
                 "; fallback not accepted: "
                 f"{self.fallback_rejection_evidence}"
@@ -1287,7 +1318,18 @@ class ReversalRepTracker:
         reason: str = "upward velocity returned to zero",
     ) -> None:
         metrics, corrected_trace, drift = self._corrected_phase_metrics()
-        failures = self._metric_failures(metrics)
+        slow_orientation_movement = (
+            metrics["duration_s"] > self.profile.max_duration_s
+            and self._slow_orientation_extension_allowed()
+        )
+        failures = self._metric_failures(
+            metrics,
+            maximum_duration_s=(
+                BENCH_SLOW_MAX_DURATION_S
+                if slow_orientation_movement
+                else None
+            ),
+        )
         short_distance = (
             self.profile.name == "bench"
             and BENCH_SHORT_DISTANCE_MIN_M
@@ -1301,6 +1343,8 @@ class ReversalRepTracker:
             if short_distance
             else "recovered_top"
             if top_detection != "velocity"
+            else "slow_movement"
+            if slow_orientation_movement
             else "accepted"
         )
         quality = self._phase_quality(
@@ -1310,6 +1354,13 @@ class ReversalRepTracker:
             evidence=evidence,
         )
         quality["short_distance"] = short_distance
+        quality["slow_orientation_movement"] = (
+            slow_orientation_movement
+        )
+        if slow_orientation_movement:
+            quality["evidence"] = (
+                f"{quality['evidence']} + complete orientation region"
+            )
         if failures:
             events.append(
                 MotionEvent(
@@ -1558,15 +1609,44 @@ class ReversalRepTracker:
         }
         return metrics, corrected_points, final_raw_velocity
 
-    def _metric_failures(self, metrics: dict[str, float]) -> list[str]:
+    def _slow_orientation_extension_allowed(self) -> bool:
+        """Allow a long bench phase only with independent fused evidence."""
+        region_overlaps_phase = (
+            self.orientation_region_started_s
+            >= self.phase_started_s - ORIENTATION_SETTLE_DURATION_S
+        )
+        return (
+            self.profile.name == "bench"
+            and region_overlaps_phase
+            and self.orientation_region_prominence_deg
+            >= ORIENTATION_MIN_PROMINENCE_DEG
+            and self.orientation_region_excess_area_deg_s
+            >= SLOW_ORIENTATION_MIN_EXCESS_AREA_DEG_S
+            and self.phase_propulsion_samples >= START_CONFIRM_SAMPLES
+            and self.phase_braking_samples
+            >= PROVISIONAL_TOP_BRAKING_SAMPLES
+            and self.phase_missed_samples == 0
+        )
+
+    def _metric_failures(
+        self,
+        metrics: dict[str, float],
+        *,
+        maximum_duration_s: float | None = None,
+    ) -> list[str]:
         failures: list[str] = []
+        duration_limit_s = (
+            self.profile.max_duration_s
+            if maximum_duration_s is None
+            else maximum_duration_s
+        )
         if metrics["duration_s"] < self.profile.min_duration_s:
             failures.append(
                 f"duration below {self.profile.min_duration_s:.2f} s"
             )
-        if metrics["duration_s"] > self.profile.max_duration_s:
+        if metrics["duration_s"] > duration_limit_s:
             failures.append(
-                f"duration above {self.profile.max_duration_s:.2f} s"
+                f"duration above {duration_limit_s:.2f} s"
             )
         minimum_displacement = (
             BENCH_SHORT_DISTANCE_MIN_M
@@ -1874,6 +1954,7 @@ class ReversalRepTracker:
         self.phase_provisional_top_index = None
         self.phase_provisional_top_velocity_m_s = 0.0
         self.phase_provisional_top_s = 0.0
+        self.phase_provisional_top_region_id = 0
         self.phase_reacceleration_samples = []
         self.phase_orientation_region_id = 0
         self.phase_boundary_s = None

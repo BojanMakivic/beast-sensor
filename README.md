@@ -127,6 +127,11 @@ REST -> UP -> TOP/REP -> DOWN -> BOTTOM -> UP
   excess area, acceleration propulsion and braking must confirm it. Several
   angle peaks remain inside one region, and orientation alone never counts a
   repetition.
+- Renewed acceleration inside the same orientation region remains part of the
+  same repetition. Only a newly started region can separate continuous
+  repetitions. A bench phase may extend to eight seconds when strong
+  orientation-area, propulsion, braking, and packet-quality evidence confirms
+  a slow movement; the result is marked `slow movement`.
 - The start and top velocities are then forced to zero, linear integration
   drift is removed, and velocity and distance are recalculated.
 - Downward movement is ignored for repetition metrics.
@@ -207,6 +212,9 @@ acceleration, velocity, distance, rest, adaptive orientation, and sample-rate
 graphs; shows accepted and rejected movement markers; and keeps a scrollable
 candidate table. The sidebar can pause the display, select an older recording,
 override its exercise profile, and choose how much recent history is visible.
+The graph key explains every line and shaded movement area. Moving the pointer
+over a trace shows its name, sensor time, value, and unit; clicking its Plotly
+legend item hides or restores that trace.
 Normal live updates do not rerun Streamlit, so zoom and pan remain unchanged
 and the graph does not blink. A 250 ms file poll backs up Windows filesystem
 notifications, queued browser updates are merged when Plotly is busy, and a

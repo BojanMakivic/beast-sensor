@@ -312,6 +312,10 @@ class TrackerSession:
                     suffixes.append("recovered top")
                 if (event.quality or {}).get("short_distance"):
                     suffixes.append("short distance")
+                if (event.quality or {}).get(
+                    "slow_orientation_movement"
+                ):
+                    suffixes.append("slow movement")
                 recovered_suffix = (
                     f" | {', '.join(suffixes)}" if suffixes else ""
                 )

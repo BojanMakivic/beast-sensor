@@ -70,5 +70,5 @@ def agile_vbt_live_display(
             "paused": bool(paused),
         },
         width="stretch",
-        height=1710,
+        height=1870,
     )

@@ -102,6 +102,41 @@ function renderShell(root: HTMLElement): void {
         )
         .join("")}
     </section>
+    <section class="graph-guide" aria-label="Graph legend">
+      <div class="guide-heading">
+        <strong>Graph key</strong>
+        <span>Move the pointer over any line to see its name, time, and value. Click a Plotly legend item to hide or show it.</span>
+      </div>
+      <div class="guide-groups">
+        <div class="guide-group">
+          <b>Acceleration</b>
+          <span><i class="swatch raw"></i>Raw</span>
+          <span><i class="swatch filtered"></i>Filtered</span>
+          <span><i class="swatch threshold"></i>Movement threshold</span>
+          <span><i class="swatch gravity"></i>Gravity baseline</span>
+        </div>
+        <div class="guide-group">
+          <b>Calculated movement</b>
+          <span><i class="swatch provisional"></i>Provisional</span>
+          <span><i class="swatch corrected"></i>Corrected rep</span>
+        </div>
+        <div class="guide-group">
+          <b>Rest and orientation</b>
+          <span><i class="swatch rest"></i>Rest confidence</span>
+          <span><i class="swatch orientation"></i>Orientation change</span>
+          <span><i class="swatch orientation-baseline"></i>Local baseline band</span>
+          <span><i class="swatch threshold"></i>Region start threshold</span>
+        </div>
+        <div class="guide-group movement-states">
+          <b>Movement areas</b>
+          <span><i class="area rest-state"></i>Rest</span>
+          <span><i class="area up-state"></i>Up</span>
+          <span><i class="area down-state"></i>Down</span>
+          <span><i class="area recovery-state"></i>Recovery</span>
+          <span><i class="area orientation-region"></i>Orientation candidate</span>
+        </div>
+      </div>
+    </section>
     <div class="plot-card">
       <div class="plot" data-role="plot" aria-label="Live movement graph"></div>
     </div>

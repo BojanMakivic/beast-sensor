@@ -409,6 +409,38 @@ class ReversalTrackerTests(unittest.TestCase):
         events = movement_events + rest_events
         self.assertEqual(sum(event.kind == "rep" for event in events), 1)
 
+    def test_slow_bench_rep_uses_one_orientation_region(self):
+        tracker = ReversalRepTracker(tracker_config_for("bench"))
+        sequence, _ = rest(tracker, 0, 5.0)
+        values = upward(0.8, 5.0)
+        orientations = [
+            axis_angle_quaternion(
+                (1.0, 0.0, 0.0),
+                math.radians(180.0)
+                * (
+                    index / (len(values) - 1)
+                    if index <= (len(values) - 1) / 2
+                    else 1.0 - index / (len(values) - 1)
+                )
+                * 2.0,
+            )
+            for index in range(len(values))
+        ]
+        sequence, movement_events = feed_oriented_values(
+            tracker,
+            sequence,
+            values,
+            orientations,
+        )
+        sequence, settling_events = rest(tracker, sequence, 0.8)
+        events = movement_events + settling_events
+        repetitions = [event for event in events if event.kind == "rep"]
+        self.assertEqual(len(repetitions), 1)
+        self.assertGreater(repetitions[0].metrics["duration_s"], 4.0)
+        self.assertTrue(
+            repetitions[0].quality["slow_orientation_movement"]
+        )
+
     def test_tiny_velocity_lobe_is_rejected(self):
         self.sequence, events = feed_values(
             self.tracker,

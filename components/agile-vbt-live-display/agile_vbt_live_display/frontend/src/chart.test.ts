@@ -106,6 +106,19 @@ describe("live Plotly updates", () => {
       "Upward displacement (m)"
     );
     expect(initialLayout.shapes).toHaveLength(1);
+    const initialTraces = (
+      plotly.newPlot.mock.calls as unknown as Array<
+        [unknown, Array<{ name: string; hovertemplate?: string }>, unknown]
+      >
+    )[0][1];
+    expect(
+      initialTraces.find((trace) => trace.name === "Movement threshold")
+        ?.hovertemplate
+    ).toContain("Value:");
+    expect(
+      initialTraces.find((trace) => trace.name === "Orientation change")
+        ?.hovertemplate
+    ).toContain("°");
 
     vi.clearAllMocks();
     await appendChart(chart, [sample(1.2)], [event(1.2)]);

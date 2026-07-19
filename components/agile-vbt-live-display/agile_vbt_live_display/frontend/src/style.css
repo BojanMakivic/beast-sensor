@@ -77,6 +77,100 @@
   text-align: right;
 }
 
+.graph-guide {
+  margin-top: 0.75rem;
+  padding: 0.7rem 0.8rem;
+  overflow: hidden;
+  border: 1px solid var(--st-border-color, #334155);
+  border-radius: var(--st-base-radius, 0.65rem);
+  background: var(--st-background-color, #0e1117);
+}
+
+.guide-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.55rem;
+}
+
+.guide-heading span {
+  font-size: 0.76rem;
+  opacity: 0.68;
+}
+
+.guide-groups {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(220px, 1fr));
+  gap: 0.55rem;
+  overflow-x: auto;
+  scrollbar-gutter: stable;
+}
+
+.guide-group {
+  display: flex;
+  min-width: 220px;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem 0.65rem;
+  padding: 0.45rem 0.55rem;
+  border-radius: 0.45rem;
+  background: var(--st-secondary-background-color, #1b2028);
+  font-size: 0.74rem;
+}
+
+.guide-group b {
+  width: 100%;
+  font-size: 0.78rem;
+}
+
+.guide-group span {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  white-space: nowrap;
+}
+
+.swatch {
+  display: inline-block;
+  width: 1.05rem;
+  height: 0;
+  border-top: 3px solid currentColor;
+}
+
+.swatch.raw { color: #94a3b8; }
+.swatch.filtered { color: #2563eb; }
+.swatch.threshold {
+  color: #dc2626;
+  border-top-style: dashed;
+}
+.swatch.gravity { color: #7c3aed; }
+.swatch.provisional { color: #64748b; }
+.swatch.corrected { color: #059669; }
+.swatch.rest { color: #0f766e; }
+.swatch.orientation { color: #d97706; }
+.swatch.orientation-baseline {
+  color: #a16207;
+  border-top-style: dotted;
+}
+
+.area {
+  display: inline-block;
+  width: 0.9rem;
+  height: 0.72rem;
+  border: 1px solid rgba(148, 163, 184, 0.45);
+  border-radius: 0.15rem;
+}
+
+.area.rest-state { background: #ccfbf1; }
+.area.up-state { background: #dbeafe; }
+.area.down-state { background: #fef3c7; }
+.area.recovery-state { background: #fee2e2; }
+.area.orientation-region {
+  border-color: rgba(217, 119, 6, 0.6);
+  background: rgba(217, 119, 6, 0.28);
+}
+
 .plot-card {
   position: relative;
   z-index: 1;
@@ -174,10 +268,24 @@ tr.rejected td {
   .status-row {
     grid-template-columns: repeat(4, minmax(120px, 1fr));
   }
+
+  .guide-groups {
+    grid-template-columns: repeat(2, minmax(260px, 1fr));
+  }
 }
 
 @media (max-width: 620px) {
   .status-row {
     grid-template-columns: repeat(2, minmax(120px, 1fr));
+  }
+
+  .guide-heading {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 0.2rem;
+  }
+
+  .guide-groups {
+    grid-template-columns: repeat(4, minmax(220px, 1fr));
   }
 }

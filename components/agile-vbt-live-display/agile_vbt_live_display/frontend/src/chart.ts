@@ -70,6 +70,19 @@ function lineTrace(
   yaxis: string,
   extra: Partial<Data> = {}
 ): Data {
+  const unit = name.includes("acceleration")
+    ? " m/s²"
+    : name.includes("velocity")
+      ? " m/s"
+      : name.includes("displacement")
+        ? " m"
+        : name.includes("Orientation")
+          ? "°"
+          : name.includes("sample rate")
+            ? " Hz"
+            : name === "Gravity baseline"
+              ? " g"
+              : "";
   return {
     type: "scattergl",
     mode: "lines",
@@ -79,6 +92,10 @@ function lineTrace(
     xaxis,
     yaxis,
     line: { color, width: 1.3 },
+    hovertemplate:
+      `<b>${name}</b><br>` +
+      `Sensor time: %{x:.2f} s<br>` +
+      `Value: %{y:.3f}${unit}<extra></extra>`,
     ...extra,
   } as Data;
 }
@@ -115,7 +132,6 @@ function baseTraces(samples: Sample[]): Data[] {
       "x",
       "y",
       {
-        hoverinfo: "skip",
         line: { color: COLORS.threshold, width: 1, dash: "dot" },
       }
     ),
@@ -128,7 +144,6 @@ function baseTraces(samples: Sample[]): Data[] {
       "y",
       {
         showlegend: false,
-        hoverinfo: "skip",
         line: { color: COLORS.threshold, width: 1, dash: "dot" },
       }
     ),
@@ -254,7 +269,9 @@ function markerTrace(
       nearestAcceleration(samples, event.sensor_time_s)
     ),
     text: selected.map((event) => event.reason ?? name),
-    hoverinfo: "x+text",
+    hovertemplate:
+      `<b>${name}</b><br>` +
+      `Sensor time: %{x:.2f} s<br>%{text}<extra></extra>`,
     xaxis: "x",
     yaxis: "y",
     marker: {
@@ -438,6 +455,12 @@ function layout(
     autosize: true,
     margin: { l: 58, r: 58, t: 82, b: 48 },
     hovermode: "x unified",
+    hoverdistance: 80,
+    hoverlabel: {
+      bgcolor: cardColor,
+      bordercolor: textColor,
+      font: { color: textColor, size: 12 },
+    },
     paper_bgcolor: "rgba(0,0,0,0)",
     plot_bgcolor: "rgba(0,0,0,0)",
     font: { color: textColor, size: 11 },
@@ -447,6 +470,8 @@ function layout(
       x: 0,
       bgcolor: cardColor,
       font: { size: 10 },
+      itemclick: "toggle",
+      itemdoubleclick: "toggleothers",
     },
     uirevision: "agile-vbt-live-dashboard",
     xaxis: { anchor: "y", showticklabels: false },

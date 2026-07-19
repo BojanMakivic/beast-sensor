@@ -186,6 +186,9 @@ describe("Agile VBT live dashboard component", () => {
     expect(parent.textContent).toContain("Rep 1");
     expect(parent.textContent).toContain("47.60 Hz");
     expect(parent.textContent).toContain("Agile VBT live movement");
+    expect(parent.textContent).toContain("Graph key");
+    expect(parent.textContent).toContain("Movement areas");
+    expect(parent.textContent).toContain("Orientation candidate");
     expect(parent.querySelector('[data-role="plot"]')).toBe(plot);
     expect(plot?.closest(".plot-card")).not.toBeNull();
     const source = parent.querySelector('[data-role="source"]');
